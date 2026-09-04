@@ -51,10 +51,12 @@ SUPPORTED_EXTENSIONS = {
     ".vdi": "VDI", ".qcow2": "QCOW2", ".wim": "WIM",
 }
 
-SKIP_DIRS = {"logs", "工作文件", "文档", ".workbuddy-ai", "$RECYCLE.BIN",
-             "System Volume Information", "@Recycle", ".zsshare_trash", "docker"}
+SKIP_DIRS = {"logs", "log", "工作文件", "文档", ".workbuddy-ai", "$RECYCLE.BIN",
+             "System Volume Information", "@Recycle", ".zsshare_trash", "docker",
+             "tmp", "temp", "cache", "__pycache__", "node_modules"}
 SKIP_FILES = {"README.md", "index.html", "software_library.json",
-              "update_library.py", "app.py", "deploy.sh", "启动软件库.bat"}
+              "update_library.py", "app.py", "deploy.sh", "启动软件库.bat",
+              "config.json", "scan_result.json"}
 
 # ============================================================
 # Software knowledge base
@@ -162,6 +164,7 @@ SVG_ICONS = {
     "back":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>',
     "external":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>',
     "chevron":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>',
+    "layers":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>',
     "settings":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>',
 }
 
@@ -173,22 +176,38 @@ def get_svg(name):
 # ============================================================
 
 def match_software(filename, dirpath):
-    lower = (filename + " " + dirpath).lower()
+    """Match a file to known software by filename. Only use filename for matching
+    to avoid false positives from directory names."""
+    lower = filename.lower()
+    # Also check the immediate parent directory name (last segment only) for context
+    parent_dir = os.path.basename(dirpath).lower()
+    search_str = lower + " " + parent_dir
+
     for key, info in SOFTWARE_DB.items():
-        if key in lower:
+        if key in search_str:
             return info["name"], info["category"], info["icon"], info["desc"], info.get("official","")
-    if "tools" in lower and ("vmware" in lower or "vm" in lower):
+    # Fallback matching
+    if "tools" in search_str and ("vmware" in search_str or "vm" in parent_dir):
         return "VMware Tools", "虚拟化", "vmware", "VMware Tools 驱动包", ""
     if "keygen" in lower or "注册" in lower:
         return "注册机/工具", "激活工具", "key", "注册/激活工具", ""
     if "补丁" in lower or "patch" in lower:
         return "补丁工具", "激活工具", "key", "软件补丁", ""
+    # Unknown — use filename without extension as name
     ext = os.path.splitext(filename)[1].lower()
     ext_icons = {".exe":"box",".msi":"box",".iso":"disk",".img":"disk",".zip":"archive",
                   ".7z":"archive",".rar":"archive",".gz":"archive",".apk":"box",
                   ".dmg":"disk",".vmdk":"disk",".ova":"box",".ovf":"box",".wim":"disk"}
     icon_name = ext_icons.get(ext, "file")
-    return os.path.splitext(filename)[0], "其他", icon_name, "软件文件", ""
+    # Use filename without extension as display name, cleaned up
+    display_name = os.path.splitext(filename)[0]
+    # Strip version numbers and common suffixes for cleaner names
+    display_name = re.sub(r'[\s_\-]*v?\d+[\.\d]*', '', display_name).strip()
+    display_name = re.sub(r'[\s_\-]*(x64|x86|x32|arm64|win32|win64)[\s_\-]*', '', display_name, flags=re.IGNORECASE).strip()
+    display_name = re.sub(r'[\s_\-]*(中文版|简体中文|英文版|正式版|绿色版|精简版|增强版|破解版|注册版|免费版)[\s_\-]*', '', display_name).strip()
+    if not display_name:
+        display_name = os.path.splitext(filename)[0]
+    return display_name, "其他", icon_name, "软件文件", ""
 
 def format_size(size_bytes):
     if size_bytes == 0: return "0 B"
@@ -226,6 +245,7 @@ def scan_directory(root_dir):
     items = []
     exts = set(SUPPORTED_EXTENSIONS.keys())
     compound_exts = [".tar.gz", ".tar.xz"]
+    seen_files = {}  # Deduplicate by filename+size
     for dirpath, dirnames, filenames in os.walk(root_dir):
         dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")]
         for filename in filenames:
@@ -249,6 +269,12 @@ def scan_directory(root_dir):
                 size = os.path.getsize(fullpath)
             except Exception:
                 size = 0
+            # Deduplicate: same filename + same size = same file (likely symlink or duplicate)
+            dedup_key = filename.lower() + "|" + str(size)
+            if dedup_key in seen_files:
+                continue
+            seen_files[dedup_key] = True
+
             relpath = os.path.relpath(fullpath, root_dir)
             webpath = relpath.replace("\\", "/")
             version = parse_version(filename)
@@ -259,7 +285,6 @@ def scan_directory(root_dir):
                 "version": version, "size": size, "sizeText": format_size(size),
                 "ext": matched_ext, "fileType": SUPPORTED_EXTENSIONS.get(matched_ext, "FILE"),
                 "date": get_file_date(fullpath), "path": webpath,
-                "relativeDir": os.path.dirname(relpath).replace("\\", "/"),
             })
     items.sort(key=lambda x: (x["category"], x["name"].lower(), x["filename"].lower()))
     return items
@@ -330,7 +355,6 @@ def build_software_list():
             "fileType": item["fileType"],
             "date": item["date"],
             "path": item["path"],
-            "relativeDir": item["relativeDir"],
         })
 
     # Apply config overrides
@@ -393,7 +417,7 @@ def generate_html():
     json_data = json.dumps(sw_list, ensure_ascii=False)
     cat_icons = json.dumps(CAT_ICON_MAP, ensure_ascii=False)
     all_icons = {}
-    for name in set(get_svg(n) and n for n in list(CAT_ICON_MAP.values()) + [sw["icon"] for sw in sw_list] + ["download","link","copy","refresh","search","package","edit","plus","back","external","chevron","settings","file","folder"]):
+    for name in set(get_svg(n) and n for n in list(CAT_ICON_MAP.values()) + [sw["icon"] for sw in sw_list] + ["download","link","copy","refresh","search","package","edit","plus","back","external","chevron","settings","file","folder","layers"]):
         all_icons[name] = SVG_ICONS.get(name, SVG_ICONS["box"])
 
     icons_json = json.dumps(all_icons, ensure_ascii=False)
@@ -544,7 +568,7 @@ const grouped={};d.forEach(s=>{if(!grouped[s.category])grouped[s.category]=[];gr
 let h='';for(const cat of Object.keys(grouped).sort()){const items=grouped[cat];h+='<div class="section"><div class="section-header">'+svg(CAT_ICONS[cat]||'box',22)+'<h2>'+cat+' ('+items.length+')</h2></div><div class="grid">';
 for(const sw of items){const latest=sw.versions[0]||{};const vc=sw.versions.length;h+='<div class="card" onclick="goVersion(\\''+sw.name.replace(/'/g,"\\\\'")+'\\')"><div class="card-top"><div class="card-icon">'+svg(sw.icon,26)+'</div><div class="card-info"><div class="card-title">'+esc(sw.name);if(latest.version)h+='<span class="card-version">v'+esc(latest.version)+'</span>';h+='</div><div class="card-desc">'+esc(sw.desc)+'</div></div></div><div class="card-meta"><span class="meta-tag type">'+(latest.fileType||'')+'</span><span class="meta-tag size">'+(latest.sizeText||'')+'</span>';if(latest.date)h+='<span class="meta-tag date">'+latest.date+'</span>';h+='</div><div class="card-footer">';
 if(sw.showOfficial&&sw.official)h+='<span class="official-badge">'+svg('external',11)+' 官网下载</span>';
-h+='<span class="card-versions-count">'+vc+' 个版本</span><span class="card-chevron">'+svg('chevron',16)+'</span></div></div>';}
+h+='<span class="card-versions-count">'+svg('layers',14)+' '+vc+' 个版本</span><span class="card-chevron">'+svg('chevron',16)+'</span></div></div>';}
 h+='</div></div>';}
 c.innerHTML=h;}
 function renderVersion(name){const sw=ALL_DATA.find(s=>s.name===name);if(!sw){goHome();return;}
@@ -552,7 +576,7 @@ const c=document.getElementById('container');let h='<div class="breadcrumb"><a o
 h+='<div class="section"><div class="section-header">'+svg(sw.icon,22)+'<h2>'+esc(sw.name)+'</h2>';if(sw.showOfficial&&sw.official)h+='<a class="btn btn-official" href="'+sw.official+'" target="_blank">'+svg('external',14)+' 去官网下载最新版</a>';h+='</div>';
 h+='<div style="font-size:13px;color:var(--text-dim);margin-bottom:16px">'+esc(sw.desc)+'</div>';
 h+='<div class="version-list">';
-for(const v of sw.versions){const dlUrl='/download/'+encodeURIComponent(v.path);h+='<div class="version-item"><div class="card-icon" style="width:40px;height:40px">'+svg(sw.icon,20)+'</div><div class="version-info"><div class="version-number">v'+esc(v.version||'未知版本')+'</div><div class="version-meta">'+esc(v.filename)+' · '+v.sizeText+' · '+(v.date||'')+'</div></div>';h+='<a class="btn btn-download" href="'+dlUrl+'" download="'+esc(v.filename)+'">'+svg('download',14)+' 下载</a></div>';}
+for(const v of sw.versions){const dlUrl='/download/'+encodeURIComponent(v.path);const verLabel=v.version?('v'+esc(v.version)):'<span style="color:var(--text-dim)">未识别版本</span>';h+='<div class="version-item"><div class="card-icon" style="width:40px;height:40px">'+svg(sw.icon,20)+'</div><div class="version-info"><div class="version-number">'+verLabel+'</div><div class="version-meta">'+esc(v.fileType)+' · '+v.sizeText+(v.date?(' · '+v.date):'')+'</div></div>';h+='<a class="btn btn-download" href="'+dlUrl+'" download="'+esc(v.filename)+'">'+svg('download',14)+' 下载</a></div>';}
 h+='</div></div>';c.innerHTML=h;}
 function renderAdmin(){const c=document.getElementById('container');let h='<div class="section"><div class="section-header">'+svg('settings',22)+'<h2>软件管理</h2></div>';
 h+='<p style="color:var(--text-dim);font-size:13px;margin-bottom:16px">共 '+ALL_DATA.length+' 个软件。扫描结果自动生成，管理操作通过 config.json 覆盖。</p>';
