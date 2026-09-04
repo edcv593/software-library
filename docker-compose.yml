@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  software-library:
+    image: edcv593/software-library:latest
+    container_name: software-library
+    restart: unless-stopped
+    ports:
+      - "8899:8899"
+    volumes:
+      # 共享数据目录 -> /data (只读)
+      # 左边改成你极空间上的实际路径
+      - /tmp/zfsv3/nvme17/13040705017/data/共享数据:/data:ro
+      # 生成文件持久化
+      - /tmp/zfsv3/nvme17/13040705017/data/共享数据/logs:/app/data
+    environment:
+      - LIB_ROOT_DIR=/data
+      - LIB_PORT=8899
+      - LIB_DATA_DIR=/app/data
+      - LIB_WATCH_INTERVAL=3600
