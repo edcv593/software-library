@@ -396,120 +396,121 @@ def generate_html():
     for name in set(get_svg(n) and n for n in list(CAT_ICON_MAP.values()) + [sw["icon"] for sw in sw_list] + ["download","link","copy","refresh","search","package","edit","plus","back","external","chevron","settings","file","folder"]):
         all_icons[name] = SVG_ICONS.get(name, SVG_ICONS["box"])
 
-    html = f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>软件库 | Software Library</title>
-<style>
-:root{{
+    icons_json = json.dumps(all_icons, ensure_ascii=False)
+    data_json = json.dumps(sw_list, ensure_ascii=False)
+    cat_icons_json = json.dumps(CAT_ICON_MAP, ensure_ascii=False)
+
+    # ---- CSS (plain string, no f-string escaping needed) ----
+    css = """<style>
+:root{
 --bg:#f5f6f8;--bg-card:#fff;--bg-search:#eef0f3;--text:#1a1d28;--text-dim:#6b7280;
 --text-bright:#111827;--accent:#4f7cff;--accent-glow:rgba(79,124,255,0.15);
 --accent-soft:rgba(79,124,255,0.06);--border:#e0e3eb;--border-bright:#c8ccd6;
 --radius:12px;--green:#16a34a;--orange:#d97706;--red:#dc2626;
 --shadow:0 2px 12px rgba(0,0,0,0.06);--shadow-lg:0 4px 24px rgba(0,0,0,0.08);
 --purple:#534AB7;--purple-soft:#EEEDFE;
-}}
-*{{margin:0;padding:0;box-sizing:border-box;}}
-body{{font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh;}}
-.header{{position:sticky;top:0;z-index:100;background:rgba(255,255,255,0.9);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding:14px 0;}}
-.header-inner{{max-width:1400px;margin:0 auto;padding:0 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap;}}
-.logo{{display:flex;align-items:center;gap:12px;flex-shrink:0;cursor:pointer;}}
-.logo-icon{{width:42px;height:42px;border-radius:10px;background:linear-gradient(135deg,var(--accent),#6b5cff);display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow);}}
-.logo-icon svg{{width:22px;height:22px;color:#fff;}}
-.logo-text h1{{font-size:18px;color:var(--text-bright);font-weight:700;display:flex;align-items:center;gap:8px;}}
-.logo-text span{{font-size:11px;color:var(--text-dim);}}
-.search-box{{flex:1;min-width:200px;position:relative;}}
-.search-box input{{width:100%;padding:10px 16px 10px 42px;background:var(--bg-search);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;transition:all 0.2s;}}
-.search-box input:focus{{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow);}}
-.search-box .search-icon{{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--text-dim);width:16px;height:16px;display:flex;align-items:center;}}
-.search-box .search-icon svg{{width:16px;height:16px;}}
-.stats{{display:flex;gap:20px;flex-shrink:0;}}
-.stat-item{{text-align:center;}}
-.stat-item .num{{font-size:18px;font-weight:700;color:var(--accent);}}
-.stat-item .label{{font-size:11px;color:var(--text-dim);}}
-.header-btns{{display:flex;gap:8px;flex-shrink:0;}}
-.header-btn{{display:inline-flex;align-items:center;gap:5px;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;background:var(--bg-card);border:1px solid var(--border-bright);color:var(--text-dim);transition:all 0.15s;text-decoration:none;}}
-.header-btn:hover{{border-color:var(--accent);color:var(--accent);}}
-.header-btn svg{{width:14px;height:14px;}}
-.header-btn.admin-btn{{background:var(--purple-soft);border-color:var(--purple);color:var(--purple);}}
-.cat-bar{{background:var(--bg-card);border-bottom:1px solid var(--border);padding:8px 0;overflow-x:auto;white-space:nowrap;position:sticky;top:69px;z-index:99;}}
-.cat-bar-inner{{max-width:1400px;margin:0 auto;padding:0 24px;display:flex;gap:8px;}}
-.cat-chip{{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:20px;background:transparent;border:1px solid var(--border);color:var(--text-dim);font-size:13px;cursor:pointer;transition:all 0.15s;white-space:nowrap;user-select:none;}}
-.cat-chip:hover{{border-color:var(--border-bright);color:var(--text);}}
-.cat-chip.active{{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);}}
-.cat-chip svg{{width:14px;height:14px;}}
-.cat-chip .count{{font-size:11px;opacity:0.7;}}
-.container{{max-width:1400px;margin:0 auto;padding:24px;}}
-.section{{margin-bottom:32px;}}
-.section-header{{display:flex;align-items:center;gap:10px;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--border);}}
-.section-header h2{{font-size:17px;color:var(--text-bright);}}
-.section-header .cat-icon{{width:22px;height:22px;color:var(--accent);}}
-.section-header .cat-icon svg{{width:22px;height:22px;}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;}}
-.card{{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;transition:all 0.2s;display:flex;flex-direction:column;gap:10px;box-shadow:var(--shadow);cursor:pointer;}}
-.card:hover{{border-color:var(--border-bright);box-shadow:var(--shadow-lg);transform:translateY(-1px);}}
-.card-top{{display:flex;align-items:flex-start;gap:12px;}}
-.card-icon{{width:48px;height:48px;border-radius:10px;background:var(--bg-search);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--accent);}}
-.card-icon svg{{width:26px;height:26px;}}
-.card-info{{flex:1;min-width:0;}}
-.card-title{{font-size:14px;font-weight:600;color:var(--text-bright);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}}
-.card-version{{display:inline-block;font-size:11px;color:var(--accent);background:var(--accent-soft);padding:1px 7px;border-radius:4px;margin-left:6px;vertical-align:middle;}}
-.card-desc{{font-size:12px;color:var(--text-dim);margin-top:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}}
-.card-meta{{display:flex;flex-wrap:wrap;gap:8px;font-size:11px;}}
-.meta-tag{{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:4px;background:rgba(0,0,0,0.03);}}
-.meta-tag.type{{color:var(--orange);}}
-.meta-tag.size{{color:var(--green);}}
-.meta-tag.date{{color:var(--text-dim);}}
-.card-footer{{display:flex;align-items:center;justify-content:space-between;margin-top:4px;}}
-.card-versions-count{{font-size:12px;color:var(--text-dim);}}
-.card-chevron{{color:var(--text-dim);}}
-.card-chevron svg{{width:16px;height:16px;}}
-.official-badge{{display:inline-flex;align-items:center;gap:3px;font-size:10px;color:var(--green);background:rgba(22,163,74,0.08);padding:2px 6px;border-radius:4px;}}
-.official-badge svg{{width:11px;height:11px;}}
-.no-results{{text-align:center;padding:60px 20px;color:var(--text-dim);}}
-.footer{{text-align:center;padding:24px;color:var(--text-dim);font-size:12px;border-top:1px solid var(--border);margin-top:40px;}}
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh;}
+.header{position:sticky;top:0;z-index:100;background:rgba(255,255,255,0.9);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding:14px 0;}
+.header-inner{max-width:1400px;margin:0 auto;padding:0 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap;}
+.logo{display:flex;align-items:center;gap:12px;flex-shrink:0;cursor:pointer;}
+.logo-icon{width:42px;height:42px;border-radius:10px;background:linear-gradient(135deg,var(--accent),#6b5cff);display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow);}
+.logo-icon svg{width:22px;height:22px;color:#fff;}
+.logo-text h1{font-size:18px;color:var(--text-bright);font-weight:700;display:flex;align-items:center;gap:8px;}
+.logo-text span{font-size:11px;color:var(--text-dim);}
+.search-box{flex:1;min-width:200px;position:relative;}
+.search-box input{width:100%;padding:10px 16px 10px 42px;background:var(--bg-search);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;transition:all 0.2s;}
+.search-box input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow);}
+.search-box .search-icon{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--text-dim);width:16px;height:16px;display:flex;align-items:center;}
+.search-box .search-icon svg{width:16px;height:16px;}
+.stats{display:flex;gap:20px;flex-shrink:0;}
+.stat-item{text-align:center;}
+.stat-item .num{font-size:18px;font-weight:700;color:var(--accent);}
+.stat-item .label{font-size:11px;color:var(--text-dim);}
+.header-btns{display:flex;gap:8px;flex-shrink:0;}
+.header-btn{display:inline-flex;align-items:center;gap:5px;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;background:var(--bg-card);border:1px solid var(--border-bright);color:var(--text-dim);transition:all 0.15s;text-decoration:none;}
+.header-btn:hover{border-color:var(--accent);color:var(--accent);}
+.header-btn svg{width:14px;height:14px;}
+.header-btn.admin-btn{background:var(--purple-soft);border-color:var(--purple);color:var(--purple);}
+.cat-bar{background:var(--bg-card);border-bottom:1px solid var(--border);padding:8px 0;overflow-x:auto;white-space:nowrap;position:sticky;top:69px;z-index:99;}
+.cat-bar-inner{max-width:1400px;margin:0 auto;padding:0 24px;display:flex;gap:8px;}
+.cat-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 14px;border-radius:20px;background:transparent;border:1px solid var(--border);color:var(--text-dim);font-size:13px;cursor:pointer;transition:all 0.15s;white-space:nowrap;user-select:none;}
+.cat-chip:hover{border-color:var(--border-bright);color:var(--text);}
+.cat-chip.active{background:var(--accent-soft);border-color:var(--accent);color:var(--accent);}
+.cat-chip svg{width:14px;height:14px;}
+.cat-chip .count{font-size:11px;opacity:0.7;}
+.container{max-width:1400px;margin:0 auto;padding:24px;}
+.section{margin-bottom:32px;}
+.section-header{display:flex;align-items:center;gap:10px;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--border);}
+.section-header h2{font-size:17px;color:var(--text-bright);}
+.section-header .cat-icon{width:22px;height:22px;color:var(--accent);}
+.section-header .cat-icon svg{width:22px;height:22px;}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;transition:all 0.2s;display:flex;flex-direction:column;gap:10px;box-shadow:var(--shadow);cursor:pointer;}
+.card:hover{border-color:var(--border-bright);box-shadow:var(--shadow-lg);transform:translateY(-1px);}
+.card-top{display:flex;align-items:flex-start;gap:12px;}
+.card-icon{width:48px;height:48px;border-radius:10px;background:var(--bg-search);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--accent);}
+.card-icon svg{width:26px;height:26px;}
+.card-info{flex:1;min-width:0;}
+.card-title{font-size:14px;font-weight:600;color:var(--text-bright);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.card-version{display:inline-block;font-size:11px;color:var(--accent);background:var(--accent-soft);padding:1px 7px;border-radius:4px;margin-left:6px;vertical-align:middle;}
+.card-desc{font-size:12px;color:var(--text-dim);margin-top:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+.card-meta{display:flex;flex-wrap:wrap;gap:8px;font-size:11px;}
+.meta-tag{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:4px;background:rgba(0,0,0,0.03);}
+.meta-tag.type{color:var(--orange);}
+.meta-tag.size{color:var(--green);}
+.meta-tag.date{color:var(--text-dim);}
+.card-footer{display:flex;align-items:center;justify-content:space-between;margin-top:4px;}
+.card-versions-count{font-size:12px;color:var(--text-dim);}
+.card-chevron{color:var(--text-dim);}
+.card-chevron svg{width:16px;height:16px;}
+.official-badge{display:inline-flex;align-items:center;gap:3px;font-size:10px;color:var(--green);background:rgba(22,163,74,0.08);padding:2px 6px;border-radius:4px;}
+.official-badge svg{width:11px;height:11px;}
+.no-results{text-align:center;padding:60px 20px;color:var(--text-dim);}
+.footer{text-align:center;padding:24px;color:var(--text-dim);font-size:12px;border-top:1px solid var(--border);margin-top:40px;}
 /* Version detail page */
-.version-list{{display:flex;flex-direction:column;gap:10px;}}
-.version-item{{display:flex;align-items:center;gap:16px;padding:14px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);transition:all 0.2s;}}
-.version-item:hover{{border-color:var(--border-bright);box-shadow:var(--shadow);}}
-.version-info{{flex:1;min-width:0;}}
-.version-number{{font-size:15px;font-weight:600;color:var(--text-bright);}}
-.version-meta{{font-size:12px;color:var(--text-dim);margin-top:2px;}}
-.btn{{display:inline-flex;align-items:center;justify-content:center;gap:4px;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;transition:all 0.15s;border:none;}}
-.btn svg{{width:14px;height:14px;}}
-.btn-download{{background:var(--accent);color:#fff;}}
-.btn-download:hover{{background:#3a6aff;}}
-.btn-official{{background:transparent;border:1px solid var(--green);color:var(--green);}}
-.btn-official:hover{{background:rgba(22,163,74,0.08);}}
-.btn-back{{background:transparent;border:1px solid var(--border-bright);color:var(--text-dim);}}
-.btn-back:hover{{border-color:var(--accent);color:var(--accent);}}
-.breadcrumb{{display:flex;align-items:center;gap:8px;margin-bottom:20px;font-size:13px;color:var(--text-dim);}}
-.breadcrumb a{{cursor:pointer;color:var(--text-dim);text-decoration:none;}}
-.breadcrumb a:hover{{color:var(--accent);}}
-.breadcrumb svg{{width:14px;height:14px;}}
+.version-list{display:flex;flex-direction:column;gap:10px;}
+.version-item{display:flex;align-items:center;gap:16px;padding:14px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);transition:all 0.2s;}
+.version-item:hover{border-color:var(--border-bright);box-shadow:var(--shadow);}
+.version-info{flex:1;min-width:0;}
+.version-number{font-size:15px;font-weight:600;color:var(--text-bright);}
+.version-meta{font-size:12px;color:var(--text-dim);margin-top:2px;}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;transition:all 0.15s;border:none;}
+.btn svg{width:14px;height:14px;}
+.btn-download{background:var(--accent);color:#fff;}
+.btn-download:hover{background:#3a6aff;}
+.btn-official{background:transparent;border:1px solid var(--green);color:var(--green);}
+.btn-official:hover{background:rgba(22,163,74,0.08);}
+.btn-back{background:transparent;border:1px solid var(--border-bright);color:var(--text-dim);}
+.btn-back:hover{border-color:var(--accent);color:var(--accent);}
+.breadcrumb{display:flex;align-items:center;gap:8px;margin-bottom:20px;font-size:13px;color:var(--text-dim);}
+.breadcrumb a{cursor:pointer;color:var(--text-dim);text-decoration:none;}
+.breadcrumb a:hover{color:var(--accent);}
+.breadcrumb svg{width:14px;height:14px;}
 /* Admin */
-.admin-bar{{background:var(--purple-soft);border-bottom:1px solid var(--border);padding:10px 0;}}
-.admin-bar-inner{{max-width:1400px;margin:0 auto;padding:0 24px;display:flex;align-items:center;gap:12px;}}
-.admin-title{{font-size:14px;font-weight:500;color:var(--purple);}}
-.admin-actions{{display:flex;gap:8px;margin-left:auto;}}
-.scan-badge{{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-dim);}}
-.scan-badge .dot{{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite;}}
-@keyframes pulse{{0%,100%{{opacity:1;}}50%{{opacity:0.4;}}}}
-@keyframes fadeIn{{from{{opacity:0;transform:translateY(8px);}}to{{opacity:1;transform:translateY(0);}}}}
-.card{{animation:fadeIn 0.3s ease-out;}}
-@keyframes spin{{from{{transform:rotate(0deg);}}to{{transform:rotate(360deg);}}}}
-.spinning svg{{animation:spin 1s linear infinite;}}
-@media(max-width:768px){{.header-inner{{flex-direction:column;align-items:stretch;}}.stats{{justify-content:center;}}.grid{{grid-template-columns:1fr;}}.cat-bar{{top:120px;}}}}
-::-webkit-scrollbar{{width:8px;height:8px;}}
-::-webkit-scrollbar-track{{background:transparent;}}
-::-webkit-scrollbar-thumb{{background:var(--border-bright);border-radius:4px;}}
-::-webkit-scrollbar-thumb:hover{{background:#a8acb8;}}
-.toast{{position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:#1a1d28;color:#fff;padding:10px 24px;border-radius:8px;font-size:13px;z-index:9999;opacity:0;transition:opacity 0.3s;box-shadow:0 4px 12px rgba(0,0,0,0.2);}}
-.toast.show{{opacity:1;}}
-</style>
-</head>
+.admin-bar{background:var(--purple-soft);border-bottom:1px solid var(--border);padding:10px 0;}
+.admin-bar-inner{max-width:1400px;margin:0 auto;padding:0 24px;display:flex;align-items:center;gap:12px;}
+.admin-title{font-size:14px;font-weight:500;color:var(--purple);}
+.admin-actions{display:flex;gap:8px;margin-left:auto;}
+.scan-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-dim);}
+.scan-badge .dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite;}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+.card{animation:fadeIn 0.3s ease-out;}
+@keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
+.spinning svg{animation:spin 1s linear infinite;}
+@media(max-width:768px){.header-inner{flex-direction:column;align-items:stretch;}.stats{justify-content:center;}.grid{grid-template-columns:1fr;}.cat-bar{top:120px;}}
+::-webkit-scrollbar{width:8px;height:8px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:var(--border-bright);border-radius:4px;}
+::-webkit-scrollbar-thumb:hover{background:#a8acb8;}
+.toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:#1a1d28;color:#fff;padding:10px 24px;border-radius:8px;font-size:13px;z-index:9999;opacity:0;transition:opacity 0.3s;box-shadow:0 4px 12px rgba(0,0,0,0.2);}
+.toast.show{opacity:1;}
+</style>"""
+
+    # ---- HTML body (f-string, only simple variable inserts) ----
+    body = f"""</head>
 <body>
 <div class="header"><div class="header-inner">
   <div class="logo" onclick="goHome()"><div class="logo-icon">{get_svg("package")}</div><div class="logo-text"><h1>软件库 <span class="scan-badge"><span class="dot"></span> Live</span></h1><span>Software Library</span></div></div>
@@ -521,50 +522,60 @@ body{{font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;backgrou
 <div id="adminBar" style="display:none"><div class="admin-bar-inner"><span class="admin-title">{get_svg("settings")} 管理后台</span><div class="admin-actions"><button class="header-btn" onclick="goHome()">{get_svg("back")} 返回首页</button></div></div></div>
 <div class="container" id="container"></div>
 <div class="footer"><p>软件库自动扫描生成 · 共 {total_files} 个文件 · 总计 {total_size_text}</p><p style="margin-top:4px;">最后更新: {now_str}</p></div>
-<script>
-const ICONS={json.dumps(all_icons, ensure_ascii=False)};
-const ALL_DATA={json.dumps(sw_list, ensure_ascii=False)};
-const CAT_ICONS={cat_icons};
-function svg(n,s){{const v=ICONS[n]||ICONS['box'];return '<span style="width:'+(s||26)+'px;height:'+(s||26)+'px;display:inline-flex;align-items:center;justify-content:center">'+v+'</span>';}}
+"""
+
+    # ---- JS (plain string, no f-string so {} works normally) ----
+    js = """<script>
+const ICONS=__ICONS_JSON__;
+const ALL_DATA=__DATA_JSON__;
+const CAT_ICONS=__CAT_ICONS_JSON__;
+function svg(n,s){const v=ICONS[n]||ICONS['box'];return '<span style="width:'+(s||26)+'px;height:'+(s||26)+'px;display:inline-flex;align-items:center;justify-content:center">'+v+'</span>';}
 let currentCat='all',searchTerm='',currentView='home',currentSoftware=null;
-function goHome(){{currentView='home';currentSoftware=null;document.getElementById('catBar').style.display='block';document.getElementById('adminBar').style.display='none';render();}}
-function goAdmin(){{currentView='admin';document.getElementById('catBar').style.display='none';document.getElementById('adminBar').style.display='block';renderAdmin();}}
-function goVersion(name){{currentView='version';currentSoftware=name;document.getElementById('catBar').style.display='none';document.getElementById('adminBar').style.display='none';renderVersion(name);}}
-function onSearch(v){{searchTerm=v.toLowerCase().trim();if(currentView!=='home')goHome();render();}}
-function selectCategory(cat){{currentCat=cat;render();}}
-function getFiltered(){{let d=ALL_DATA;if(currentCat!=='all')d=d.filter(s=>s.category===currentCat);if(searchTerm)d=d.filter(s=>(s.name+' '+s.desc+' '+s.category).toLowerCase().includes(searchTerm));return d;}}
-function buildCatBar(){{const bar=document.getElementById('catBarInner');bar.innerHTML='<div class="cat-chip '+(currentCat==='all'?'active':'')+'" onclick="selectCategory(\\'all\\')">'+svg('package',14)+' 全部 <span class="count">('+ALL_DATA.length+')</span></div>';const cats=[...new Set(ALL_DATA.map(s=>s.category))];cats.forEach(c=>{{const n=ALL_DATA.filter(s=>s.category===c).length;bar.innerHTML+='<div class="cat-chip '+(currentCat===c?'active':'')+'" onclick="selectCategory(\\''+c.replace(/'/g,"\\\\'")+'\\')">'+svg(CAT_ICONS[c]||'box',14)+' '+c+' <span class="count">('+n+')</span></div>';}});}}
-function render(){{if(currentView==='home')renderHome();}}
-function renderHome(){{buildCatBar();const c=document.getElementById('container');const d=getFiltered();document.getElementById('statCount').textContent=d.reduce((a,s)=>a+s.versions.length,0);if(d.length===0){{c.innerHTML='<div class="no-results">'+svg('search',48)+'<p style="margin-top:16px">没有找到匹配的文件</p></div>';return;}}
-const grouped={{};d.forEach(s=>{{if(!grouped[s.category])grouped[s.category]=[];grouped[s.category].push(s);}});
-let h='';for(const cat of Object.keys(grouped).sort()){{const items=grouped[cat];h+='<div class="section"><div class="section-header">'+svg(CAT_ICONS[cat]||'box',22)+'<h2>'+cat+' ('+items.length+')</h2></div><div class="grid">';
-for(const sw of items){{const latest=sw.versions[0]||{{}};const vc=sw.versions.length;h+='<div class="card" onclick="goVersion(\\''+sw.name.replace(/'/g,"\\\\'")+'\\')"><div class="card-top"><div class="card-icon">'+svg(sw.icon,26)+'</div><div class="card-info"><div class="card-title">'+esc(sw.name);if(latest.version)h+='<span class="card-version">v'+esc(latest.version)+'</span>';h+='</div><div class="card-desc">'+esc(sw.desc)+'</div></div></div><div class="card-meta"><span class="meta-tag type">'+(latest.fileType||'')+'</span><span class="meta-tag size">'+(latest.sizeText||'')+'</span>';if(latest.date)h+='<span class="meta-tag date">'+latest.date+'</span>';h+='</div><div class="card-footer">';
+function goHome(){currentView='home';currentSoftware=null;document.getElementById('catBar').style.display='block';document.getElementById('adminBar').style.display='none';render();}
+function goAdmin(){currentView='admin';document.getElementById('catBar').style.display='none';document.getElementById('adminBar').style.display='block';renderAdmin();}
+function goVersion(name){currentView='version';currentSoftware=name;document.getElementById('catBar').style.display='none';document.getElementById('adminBar').style.display='none';renderVersion(name);}
+function onSearch(v){searchTerm=v.toLowerCase().trim();if(currentView!=='home')goHome();render();}
+function selectCategory(cat){currentCat=cat;render();}
+function getFiltered(){let d=ALL_DATA;if(currentCat!=='all')d=d.filter(s=>s.category===currentCat);if(searchTerm)d=d.filter(s=>(s.name+' '+s.desc+' '+s.category).toLowerCase().includes(searchTerm));return d;}
+function buildCatBar(){const bar=document.getElementById('catBarInner');bar.innerHTML='<div class="cat-chip '+(currentCat==='all'?'active':'')+'" onclick="selectCategory(\\'all\\')">'+svg('package',14)+' 全部 <span class="count">('+ALL_DATA.length+')</span></div>';const cats=[...new Set(ALL_DATA.map(s=>s.category))];cats.forEach(c=>{const n=ALL_DATA.filter(s=>s.category===c).length;bar.innerHTML+='<div class="cat-chip '+(currentCat===c?'active':'')+'" onclick="selectCategory(\\''+c.replace(/'/g,"\\\\'")+'\\')">'+svg(CAT_ICONS[c]||'box',14)+' '+c+' <span class="count">('+n+')</span></div>';});}
+function render(){if(currentView==='home')renderHome();}
+function renderHome(){buildCatBar();const c=document.getElementById('container');const d=getFiltered();document.getElementById('statCount').textContent=d.reduce((a,s)=>a+s.versions.length,0);if(d.length===0){c.innerHTML='<div class="no-results">'+svg('search',48)+'<p style="margin-top:16px">没有找到匹配的文件</p></div>';return;}
+const grouped={};d.forEach(s=>{if(!grouped[s.category])grouped[s.category]=[];grouped[s.category].push(s);});
+let h='';for(const cat of Object.keys(grouped).sort()){const items=grouped[cat];h+='<div class="section"><div class="section-header">'+svg(CAT_ICONS[cat]||'box',22)+'<h2>'+cat+' ('+items.length+')</h2></div><div class="grid">';
+for(const sw of items){const latest=sw.versions[0]||{};const vc=sw.versions.length;h+='<div class="card" onclick="goVersion(\\''+sw.name.replace(/'/g,"\\\\'")+'\\')"><div class="card-top"><div class="card-icon">'+svg(sw.icon,26)+'</div><div class="card-info"><div class="card-title">'+esc(sw.name);if(latest.version)h+='<span class="card-version">v'+esc(latest.version)+'</span>';h+='</div><div class="card-desc">'+esc(sw.desc)+'</div></div></div><div class="card-meta"><span class="meta-tag type">'+(latest.fileType||'')+'</span><span class="meta-tag size">'+(latest.sizeText||'')+'</span>';if(latest.date)h+='<span class="meta-tag date">'+latest.date+'</span>';h+='</div><div class="card-footer">';
 if(sw.showOfficial&&sw.official)h+='<span class="official-badge">'+svg('external',11)+' 官网下载</span>';
-h+='<span class="card-versions-count">'+vc+' 个版本</span><span class="card-chevron">'+svg('chevron',16)+'</span></div></div>';}}
-h+='</div></div>';}}
-c.innerHTML=h;}}
-function renderVersion(name){{const sw=ALL_DATA.find(s=>s.name===name);if(!sw){{goHome();return;}}
+h+='<span class="card-versions-count">'+vc+' 个版本</span><span class="card-chevron">'+svg('chevron',16)+'</span></div></div>';}
+h+='</div></div>';}
+c.innerHTML=h;}
+function renderVersion(name){const sw=ALL_DATA.find(s=>s.name===name);if(!sw){goHome();return;}
 const c=document.getElementById('container');let h='<div class="breadcrumb"><a onclick="goHome()">'+svg('back',14)+' 首页</a> / <span>'+esc(sw.name)+'</span></div>';
 h+='<div class="section"><div class="section-header">'+svg(sw.icon,22)+'<h2>'+esc(sw.name)+'</h2>';if(sw.showOfficial&&sw.official)h+='<a class="btn btn-official" href="'+sw.official+'" target="_blank">'+svg('external',14)+' 去官网下载最新版</a>';h+='</div>';
 h+='<div style="font-size:13px;color:var(--text-dim);margin-bottom:16px">'+esc(sw.desc)+'</div>';
 h+='<div class="version-list">';
-for(const v of sw.versions){{const dlUrl='/download/'+encodeURIComponent(v.path);h+='<div class="version-item"><div class="card-icon" style="width:40px;height:40px">'+svg(sw.icon,20)+'</div><div class="version-info"><div class="version-number">v'+esc(v.version||'未知版本')+'</div><div class="version-meta">'+esc(v.filename)+' · '+v.sizeText+' · '+(v.date||'')+'</div></div>';h+='<a class="btn btn-download" href="'+dlUrl+'" download="'+esc(v.filename)+'">'+svg('download',14)+' 下载</a></div>';}}
-h+='</div></div>';c.innerHTML=h;}}
-function renderAdmin(){{const c=document.getElementById('container');let h='<div class="section"><div class="section-header">'+svg('settings',22)+'<h2>软件管理</h2></div>';
+for(const v of sw.versions){const dlUrl='/download/'+encodeURIComponent(v.path);h+='<div class="version-item"><div class="card-icon" style="width:40px;height:40px">'+svg(sw.icon,20)+'</div><div class="version-info"><div class="version-number">v'+esc(v.version||'未知版本')+'</div><div class="version-meta">'+esc(v.filename)+' · '+v.sizeText+' · '+(v.date||'')+'</div></div>';h+='<a class="btn btn-download" href="'+dlUrl+'" download="'+esc(v.filename)+'">'+svg('download',14)+' 下载</a></div>';}
+h+='</div></div>';c.innerHTML=h;}
+function renderAdmin(){const c=document.getElementById('container');let h='<div class="section"><div class="section-header">'+svg('settings',22)+'<h2>软件管理</h2></div>';
 h+='<p style="color:var(--text-dim);font-size:13px;margin-bottom:16px">共 '+ALL_DATA.length+' 个软件。扫描结果自动生成，管理操作通过 config.json 覆盖。</p>';
 h+='<div class="grid">';
-for(const sw of ALL_DATA){{h+='<div class="card" style="cursor:default"><div class="card-top"><div class="card-icon">'+svg(sw.icon,26)+'</div><div class="card-info"><div class="card-title">'+esc(sw.name)+'</div><div class="card-desc">'+esc(sw.category)+' · '+sw.versions.length+' 个版本</div></div></div>';
+for(const sw of ALL_DATA){h+='<div class="card" style="cursor:default"><div class="card-top"><div class="card-icon">'+svg(sw.icon,26)+'</div><div class="card-info"><div class="card-title">'+esc(sw.name)+'</div><div class="card-desc">'+esc(sw.category)+' · '+sw.versions.length+' 个版本</div></div></div>';
 h+='<div style="display:flex;gap:8px;margin-top:4px"><button class="header-btn" onclick="toggleOfficial(\\''+sw.name.replace(/'/g,"\\\\'")+'\\')">'+svg('external',14)+' '+(sw.showOfficial?'取消官网':'标记官网')+'</button><button class="header-btn" onclick="goVersion(\\''+sw.name.replace(/'/g,"\\\\'")+'\\')">'+svg('chevron',14)+' 查看版本</button></div>';
-h+='</div>';}}
-h+='</div></div>';c.innerHTML=h;}}
-async function toggleOfficial(name){{const sw=ALL_DATA.find(s=>s.name===name);if(!sw)return;const newVal=!sw.showOfficial;try{{const r=await fetch('/api/admin/software',{method:'PUT',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{name:name,showOfficial:newVal}})}});const d=await r.json();if(d.success){{sw.showOfficial=newVal;renderAdmin();showToast(newVal?'已标记官网下载':'已取消官网标记');}}else{{showToast('操作失败: '+(d.error||''));}}}}catch(e){{showToast('请求失败');}}}}
-async function doRescan(){{const btn=document.getElementById('rescanBtn');btn.classList.add('spinning');btn.innerHTML=svg('refresh',14)+' 扫描中';try{{const r=await fetch('/api/rescan',{{method:'POST'}});const d=await r.json();if(d.success){{showToast('扫描完成: '+d.totalFiles+' 个文件');setTimeout(()=>location.reload(),1500);}}else{{showToast('扫描失败');btn.classList.remove('spinning');btn.innerHTML=svg('refresh',14)+' 重新扫描';}}}}catch(e){{showToast('请求失败');btn.classList.remove('spinning');btn.innerHTML=svg('refresh',14)+' 重新扫描';}}}}
-function esc(s){{const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}}
-function showToast(msg){{let t=document.getElementById('toast');if(!t){{t=document.createElement('div');t.id='toast';t.className='toast';document.body.appendChild(t);}}t.textContent=msg;t.classList.add('show');clearTimeout(t._timer);t._timer=setTimeout(()=>t.classList.remove('show'),2500);}}
+h+='</div>';}
+h+='</div></div>';c.innerHTML=h;}
+async function toggleOfficial(name){const sw=ALL_DATA.find(s=>s.name===name);if(!sw)return;const newVal=!sw.showOfficial;try{const r=await fetch('/api/admin/software',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,showOfficial:newVal})});const d=await r.json();if(d.success){sw.showOfficial=newVal;renderAdmin();showToast(newVal?'已标记官网下载':'已取消官网标记');}else{showToast('操作失败: '+(d.error||''));}}catch(e){showToast('请求失败');}}
+async function doRescan(){const btn=document.getElementById('rescanBtn');btn.classList.add('spinning');btn.innerHTML=svg('refresh',14)+' 扫描中';try{const r=await fetch('/api/rescan',{method:'POST'});const d=await r.json();if(d.success){showToast('扫描完成: '+d.totalFiles+' 个文件');setTimeout(()=>location.reload(),1500);}else{showToast('扫描失败');btn.classList.remove('spinning');btn.innerHTML=svg('refresh',14)+' 重新扫描';}}catch(e){showToast('请求失败');btn.classList.remove('spinning');btn.innerHTML=svg('refresh',14)+' 重新扫描';}}
+function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+function showToast(msg){let t=document.getElementById('toast');if(!t){t=document.createElement('div');t.id='toast';t.className='toast';document.body.appendChild(t);}t.textContent=msg;t.classList.add('show');clearTimeout(t._timer);t._timer=setTimeout(()=>t.classList.remove('show'),2500);}
 renderHome();
 </script>
 </body>
 </html>"""
+
+    # Insert dynamic data into JS via replace (no f-string needed)
+    js = js.replace("__ICONS_JSON__", icons_json)
+    js = js.replace("__DATA_JSON__", data_json)
+    js = js.replace("__CAT_ICONS_JSON__", cat_icons_json)
+
+    html = "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>软件库 | Software Library</title>\n" + css + "\n" + body + js
     return html
 
 # ============================================================
