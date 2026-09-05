@@ -6,8 +6,9 @@ on:
     paths:
       - 'app.py'
       - 'Dockerfile'
+      - 'docker-compose.yml'
       - '.github/workflows/docker-publish.yml'
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 env:
   IMAGE_NAME: software-library
@@ -27,6 +28,9 @@ jobs:
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Validate Python
+        run: python -m py_compile app.py
 
       - name: Extract metadata
         id: meta
