@@ -8,13 +8,17 @@ WORKDIR /app
 COPY app.py /app/app.py
 COPY v7.py /app/v7.py
 
+# app.py imports requests, so install the runtime dependency in the image.
+RUN pip install --no-cache-dir --disable-pip-version-check requests
+
 ENV LIB_ROOT_DIR=/data \
     LIB_PORT=8899 \
     LIB_DATA_DIR=/app/data \
+    LIB_UPLOAD_DIR=/app/data/uploads \
     LIB_WATCH_INTERVAL=3600 \
     PYTHONUNBUFFERED=1
 
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data /app/data/uploads
 
 EXPOSE 8899
 
