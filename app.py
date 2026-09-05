@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Software Library Manager v4
+Software Library Manager v5
 ==========================
 Scans NAS directory for software files, provides a searchable web UI
 with user authentication, admin panel, file upload, and download system.
@@ -24,6 +24,8 @@ import http.server
 import socketserver
 import urllib.parse
 import cgi
+import shutil
+import requests
 from datetime import datetime
 
 # ============================================================
@@ -41,6 +43,7 @@ CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 UPLOAD_DIR = os.path.join(ROOT_DIR, "uploads")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
+DOWNLOAD_CACHE = os.path.join(DATA_DIR, "download_cache")
 
 SUPPORTED_EXTENSIONS = {
     ".exe": "EXE", ".msi": "MSI", ".iso": "ISO", ".img": "IMG",
@@ -60,6 +63,7 @@ SKIP_FILES = {"README.md", "index.html", "software_library.json",
               "config.json", "scan_result.json", "users.json"}
 
 MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500MB
+MAX_DOWNLOAD_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
 
 # ============================================================
 # Software knowledge base
@@ -175,6 +179,7 @@ SVG_ICONS = {
     "logout":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>',
     "save":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>',
     "close":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+    "menu":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>',
 }
 
 def get_svg(name):
@@ -287,7 +292,7 @@ def match_software(filename, dirpath):
                   ".7z":"archive",".rar":"archive",".gz":"archive",".apk":"box",
                   ".dmg":"disk",".vmdk":"disk",".ova":"box",".ovf":"box",".wim":"disk"}
     icon_name = ext_icons.get(ext, "file")
-    # Just use the filename (without extension) as the display name
+    # 直接使用文件名（不含扩展名）作为显示名称
     display_name = os.path.splitext(filename)[0]
     return display_name, "其他", icon_name, "软件文件", ""
 
@@ -410,6 +415,8 @@ def build_software_list():
                 "official": item["official"],
                 "versions": [],
                 "showOfficial": False,
+                "customOfficial": "",
+                "downloadUrl": "",
             }
         grouped[name]["versions"].append({
             "filename": item["filename"],
@@ -418,6 +425,7 @@ def build_software_list():
             "fileType": item["fileType"],
             "date": item["date"],
             "path": item["path"],
+            "displayName": item["filename"],  # 直接显示文件名
         })
 
     for sw_name, cfg in overrides.items():
@@ -427,6 +435,8 @@ def build_software_list():
             if "desc" in cfg: grouped[sw_name]["desc"] = cfg["desc"]
             if "official" in cfg: grouped[sw_name]["official"] = cfg["official"]
             if "showOfficial" in cfg: grouped[sw_name]["showOfficial"] = cfg["showOfficial"]
+            if "customOfficial" in cfg: grouped[sw_name]["customOfficial"] = cfg["customOfficial"]
+            if "downloadUrl" in cfg: grouped[sw_name]["downloadUrl"] = cfg["downloadUrl"]
         else:
             grouped[sw_name] = {
                 "name": sw_name,
@@ -436,6 +446,8 @@ def build_software_list():
                 "official": cfg.get("official", ""),
                 "versions": [],
                 "showOfficial": cfg.get("showOfficial", False),
+                "customOfficial": cfg.get("customOfficial", ""),
+                "downloadUrl": cfg.get("downloadUrl", ""),
             }
 
     sw_list = list(grouped.values())
@@ -466,7 +478,7 @@ def generate_html():
 
     cat_icons = json.dumps(CAT_ICON_MAP, ensure_ascii=False)
     all_icons = {}
-    for name in set(get_svg(n) and n for n in list(CAT_ICON_MAP.values()) + [sw["icon"] for sw in sw_list] + ["download","upload","link","copy","refresh","search","package","edit","plus","back","external","chevron","settings","file","folder","layers","user","users","logout","save","close","lock","box"]):
+    for name in set(get_svg(n) and n for n in list(CAT_ICON_MAP.values()) + [sw["icon"] for sw in sw_list] + ["download","upload","link","copy","refresh","search","package","edit","plus","back","external","chevron","settings","file","folder","layers","user","users","logout","save","close","lock","box","menu"]):
         all_icons[name] = SVG_ICONS.get(name, SVG_ICONS["box"])
 
     icons_json = json.dumps(all_icons, ensure_ascii=False)
@@ -484,130 +496,142 @@ def generate_html():
 }
 *{margin:0;padding:0;box-sizing:border-box;}
 body{font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh;}
-.header{position:sticky;top:0;z-index:100;background:rgba(255,255,255,0.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding:14px 0;}
-.header-inner{max-width:1400px;margin:0 auto;padding:0 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap;}
-.logo{display:flex;align-items:center;gap:12px;flex-shrink:0;cursor:pointer;}
-.logo-icon{width:42px;height:42px;border-radius:10px;background:linear-gradient(135deg,var(--accent),#6b5cff);display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow);}
-.logo-icon svg{width:22px;height:22px;color:#fff;}
-.logo-text h1{font-size:18px;color:var(--text-bright);font-weight:700;display:flex;align-items:center;gap:8px;}
-.logo-text span{font-size:11px;color:var(--text-dim);}
-.search-box{flex:1;min-width:200px;position:relative;}
-.search-box input{width:100%;padding:10px 16px 10px 42px;background:var(--bg-search);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;transition:all 0.2s;}
+.header{position:sticky;top:0;z-index:100;background:rgba(255,255,255,0.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding:10px 0;}
+.header-inner{max-width:1400px;margin:0 auto;padding:0 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+.logo{display:flex;align-items:center;gap:10px;flex-shrink:0;cursor:pointer;}
+.logo-icon{width:36px;height:36px;border-radius:8px;background:linear-gradient(135deg,var(--accent),#6b5cff);display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow);}
+.logo-icon svg{width:18px;height:18px;color:#fff;}
+.logo-text h1{font-size:16px;color:var(--text-bright);font-weight:700;display:flex;align-items:center;gap:6px;}
+.logo-text span{font-size:10px;color:var(--text-dim);display:block;}
+.search-box{flex:1;min-width:150px;position:relative;}
+.search-box input{width:100%;padding:8px 12px 8px 36px;background:var(--bg-search);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;transition:all 0.2s;}
 .search-box input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow);}
-.search-box .search-icon{position:absolute;left:14px;top:50%;transform:translateY(-50%);color:var(--text-dim);width:16px;height:16px;display:flex;align-items:center;}
-.search-box .search-icon svg{width:16px;height:16px;}
-.stats{display:flex;gap:20px;flex-shrink:0;}
+.search-box .search-icon{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--text-dim);width:14px;height:14px;display:flex;align-items:center;}
+.search-box .search-icon svg{width:14px;height:14px;}
+.stats{display:flex;gap:12px;flex-shrink:0;}
 .stat-item{text-align:center;}
-.stat-item .num{font-size:18px;font-weight:700;color:var(--accent);}
-.stat-item .label{font-size:11px;color:var(--text-dim);}
-.header-btns{display:flex;gap:8px;flex-shrink:0;}
-.header-btn{display:inline-flex;align-items:center;gap:5px;padding:8px 14px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;background:var(--bg-card);border:1px solid var(--border-bright);color:var(--text-dim);transition:all 0.15s;text-decoration:none;}
+.stat-item .num{font-size:14px;font-weight:700;color:var(--accent);}
+.stat-item .label{font-size:9px;color:var(--text-dim);}
+.header-btns{display:flex;gap:4px;flex-shrink:0;}
+.header-btn{display:inline-flex;align-items:center;gap:4px;padding:6px 10px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;background:var(--bg-card);border:1px solid var(--border-bright);color:var(--text-dim);transition:all 0.15s;text-decoration:none;}
 .header-btn:hover{border-color:var(--accent);color:var(--accent);}
-.header-btn svg{width:14px;height:14px;}
+.header-btn svg{width:12px;height:12px;}
 .header-btn.admin-btn{background:var(--purple-soft);border-color:var(--purple);color:var(--purple);}
 .header-btn.danger{color:var(--red);border-color:var(--red);}
-.cat-select{display:flex;align-items:center;gap:8px;padding:8px 0;flex-wrap:wrap;}
-.cat-select select{padding:7px 14px;border-radius:8px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:13px;cursor:pointer;outline:none;}
-.cat-select select:focus{border-color:var(--accent);}
-.container{max-width:1400px;margin:0 auto;padding:24px;}
-.section{margin-bottom:32px;}
-.section-header{display:flex;align-items:center;gap:10px;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--border);}
-.section-header h2{font-size:17px;color:var(--text-bright);}
-.section-header .cat-icon{width:22px;height:22px;color:var(--accent);}
-.section-header .cat-icon svg{width:22px;height:22px;}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;}
-.card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;transition:all 0.2s;display:flex;flex-direction:column;gap:10px;box-shadow:var(--shadow);cursor:pointer;}
+.header-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+.header-btn.primary:hover{background:#3a6aff;}
+/* Dropdown menu */
+.dropdown{position:relative;display:inline-block;}
+.dropdown-menu{display:none;position:absolute;right:0;top:100%;min-width:160px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow-lg);z-index:200;padding:4px 0;margin-top:4px;}
+.dropdown-menu.show{display:block;}
+.dropdown-menu a,.dropdown-menu button{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:13px;color:var(--text);text-decoration:none;background:none;border:none;width:100%;text-align:left;cursor:pointer;transition:background 0.1s;}
+.dropdown-menu a:hover,.dropdown-menu button:hover{background:var(--accent-soft);color:var(--accent);}
+.dropdown-menu .divider{height:1px;background:var(--border);margin:4px 0;}
+.cat-filter{display:flex;align-items:center;gap:6px;padding:4px 0;flex-wrap:wrap;max-width:100%;overflow-x:auto;}
+.cat-filter select{padding:5px 10px;border-radius:6px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;cursor:pointer;outline:none;max-width:150px;}
+.cat-filter select:focus{border-color:var(--accent);}
+.container{max-width:1400px;margin:0 auto;padding:16px;}
+.section{margin-bottom:24px;}
+.section-header{display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-bottom:6px;border-bottom:1px solid var(--border);}
+.section-header h2{font-size:15px;color:var(--text-bright);}
+.section-header .cat-icon{width:18px;height:18px;color:var(--accent);}
+.section-header .cat-icon svg{width:18px;height:18px;}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:14px;transition:all 0.2s;display:flex;flex-direction:column;gap:8px;box-shadow:var(--shadow);cursor:pointer;}
 .card:hover{border-color:var(--border-bright);box-shadow:var(--shadow-lg);transform:translateY(-1px);}
-.card-top{display:flex;align-items:flex-start;gap:12px;}
-.card-icon{width:48px;height:48px;border-radius:10px;background:var(--bg-search);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--accent);}
-.card-icon svg{width:26px;height:26px;}
+.card-top{display:flex;align-items:flex-start;gap:10px;}
+.card-icon{width:40px;height:40px;border-radius:8px;background:var(--bg-search);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--accent);}
+.card-icon svg{width:20px;height:20px;}
 .card-info{flex:1;min-width:0;}
-.card-title{font-size:14px;font-weight:600;color:var(--text-bright);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.card-desc{font-size:12px;color:var(--text-dim);margin-top:3px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
-.card-meta{display:flex;flex-wrap:wrap;gap:8px;font-size:11px;}
-.meta-tag{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:4px;background:rgba(0,0,0,0.03);}
+.card-title{font-size:13px;font-weight:600;color:var(--text-bright);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.card-desc{font-size:11px;color:var(--text-dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+.card-meta{display:flex;flex-wrap:wrap;gap:4px;font-size:10px;}
+.meta-tag{display:inline-flex;align-items:center;gap:2px;padding:1px 6px;border-radius:3px;background:rgba(0,0,0,0.03);}
 .meta-tag.type{color:var(--orange);}
 .meta-tag.size{color:var(--green);}
 .meta-tag.date{color:var(--text-dim);}
-.card-footer{display:flex;align-items:center;justify-content:space-between;margin-top:4px;}
-.card-versions-count{font-size:12px;color:var(--text-dim);display:inline-flex;align-items:center;gap:4px;}
-.card-versions-count svg{width:14px;height:14px;}
+.card-footer{display:flex;align-items:center;justify-content:space-between;margin-top:2px;}
+.card-versions-count{font-size:11px;color:var(--text-dim);display:inline-flex;align-items:center;gap:3px;}
+.card-versions-count svg{width:12px;height:12px;}
 .card-chevron{color:var(--text-dim);}
-.card-chevron svg{width:16px;height:16px;}
-.official-badge{display:inline-flex;align-items:center;gap:3px;font-size:10px;color:var(--green);background:rgba(22,163,74,0.08);padding:2px 6px;border-radius:4px;}
-.official-badge svg{width:11px;height:11px;}
-.no-results{text-align:center;padding:60px 20px;color:var(--text-dim);}
-.footer{text-align:center;padding:24px;color:var(--text-dim);font-size:12px;border-top:1px solid var(--border);margin-top:40px;}
-.version-list{display:flex;flex-direction:column;gap:10px;}
-.version-item{display:flex;align-items:center;gap:16px;padding:14px 16px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);transition:all 0.2s;}
+.card-chevron svg{width:14px;height:14px;}
+.official-badge{display:inline-flex;align-items:center;gap:3px;font-size:9px;color:var(--green);background:rgba(22,163,74,0.08);padding:1px 5px;border-radius:3px;}
+.official-badge svg{width:10px;height:10px;}
+.no-results{text-align:center;padding:40px 16px;color:var(--text-dim);}
+.footer{text-align:center;padding:16px;color:var(--text-dim);font-size:11px;border-top:1px solid var(--border);margin-top:24px;}
+.version-list{display:flex;flex-direction:column;gap:8px;}
+.version-item{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);transition:all 0.2s;}
 .version-item:hover{border-color:var(--border-bright);box-shadow:var(--shadow);}
 .version-info{flex:1;min-width:0;}
-.version-number{font-size:15px;font-weight:600;color:var(--text-bright);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.version-meta{font-size:12px;color:var(--text-dim);margin-top:2px;}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;padding:8px 18px;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;text-decoration:none;transition:all 0.15s;border:none;}
+.version-filename{font-size:14px;font-weight:600;color:var(--text-bright);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.version-meta{font-size:11px;color:var(--text-dim);margin-top:1px;}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;text-decoration:none;transition:all 0.15s;border:none;}
 .btn svg{width:14px;height:14px;}
 .btn-download{background:var(--accent);color:#fff;}
 .btn-download:hover{background:#3a6aff;}
 .btn-official{background:transparent;border:1px solid var(--green);color:var(--green);}
 .btn-official:hover{background:rgba(22,163,74,0.08);}
+.btn-external{background:transparent;border:1px solid var(--purple);color:var(--purple);}
+.btn-external:hover{background:var(--purple-soft);}
 .btn-back{background:transparent;border:1px solid var(--border-bright);color:var(--text-dim);}
 .btn-back:hover{border-color:var(--accent);color:var(--accent);}
 .btn-primary{background:var(--accent);color:#fff;}
 .btn-primary:hover{background:#3a6aff;}
 .btn-danger{background:transparent;border:1px solid var(--red);color:var(--red);}
 .btn-danger:hover{background:rgba(220,38,38,0.08);}
-.btn-sm{padding:5px 10px;font-size:12px;}
-.breadcrumb{display:flex;align-items:center;gap:8px;margin-bottom:20px;font-size:13px;color:var(--text-dim);}
+.btn-sm{padding:4px 8px;font-size:11px;}
+.btn-xs{padding:2px 6px;font-size:10px;}
+.breadcrumb{display:flex;align-items:center;gap:6px;margin-bottom:14px;font-size:12px;color:var(--text-dim);}
 .breadcrumb a{cursor:pointer;color:var(--text-dim);text-decoration:none;}
 .breadcrumb a:hover{color:var(--accent);}
-.breadcrumb svg{width:14px;height:14px;}
-.scan-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-dim);}
-.scan-badge .dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite;}
+.breadcrumb svg{width:12px;height:12px;}
+.scan-badge{display:inline-flex;align-items:center;gap:3px;font-size:10px;color:var(--text-dim);}
+.scan-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite;}
 @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
-@keyframes fadeIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
-.card{animation:fadeIn 0.3s ease-out;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:translateY(0);}}
+.card{animation:fadeIn 0.25s ease-out;}
 @keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
 .spinning svg{animation:spin 1s linear infinite;}
 @media(max-width:768px){.header-inner{flex-direction:column;align-items:stretch;}.stats{justify-content:center;}.grid{grid-template-columns:1fr;}}
-::-webkit-scrollbar{width:8px;height:8px;}
+::-webkit-scrollbar{width:6px;height:6px;}
 ::-webkit-scrollbar-track{background:transparent;}
-::-webkit-scrollbar-thumb{background:var(--border-bright);border-radius:4px;}
+::-webkit-scrollbar-thumb{background:var(--border-bright);border-radius:3px;}
 ::-webkit-scrollbar-thumb:hover{background:#a8acb8;}
-.toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:#1a1d28;color:#fff;padding:10px 24px;border-radius:8px;font-size:13px;z-index:9999;opacity:0;transition:opacity 0.3s;box-shadow:0 4px 12px rgba(0,0,0,0.2);}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1a1d28;color:#fff;padding:8px 20px;border-radius:6px;font-size:13px;z-index:9999;opacity:0;transition:opacity 0.3s;box-shadow:0 4px 12px rgba(0,0,0,0.2);}
 .toast.show{opacity:1;}
 /* Auth modal */
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:2000;display:flex;align-items:center;justify-content:center;}
-.modal{background:var(--bg-card);border-radius:16px;padding:32px;max-width:400px;width:90%;box-shadow:var(--shadow-lg);}
-.modal h2{font-size:20px;color:var(--text-bright);margin-bottom:20px;display:flex;align-items:center;gap:8px;}
-.modal h2 svg{width:22px;height:22px;color:var(--accent);}
-.form-group{margin-bottom:16px;}
-.form-group label{display:block;font-size:13px;color:var(--text-dim);margin-bottom:6px;}
-.form-group input{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:8px;font-size:14px;color:var(--text);outline:none;transition:all 0.2s;}
+.modal{background:var(--bg-card);border-radius:12px;padding:24px;max-width:400px;width:90%;box-shadow:var(--shadow-lg);}
+.modal h2{font-size:18px;color:var(--text-bright);margin-bottom:16px;display:flex;align-items:center;gap:8px;}
+.modal h2 svg{width:20px;height:20px;color:var(--accent);}
+.form-group{margin-bottom:12px;}
+.form-group label{display:block;font-size:12px;color:var(--text-dim);margin-bottom:4px;}
+.form-group input{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;color:var(--text);outline:none;transition:all 0.2s;}
 .form-group input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow);}
-.modal-btns{display:flex;gap:10px;margin-top:20px;}
-.modal-error{color:var(--red);font-size:13px;margin-bottom:10px;display:none;}
+.modal-btns{display:flex;gap:8px;margin-top:16px;}
+.modal-error{color:var(--red);font-size:12px;margin-bottom:8px;display:none;}
 /* Admin panels */
-.admin-section{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:20px;}
-.admin-section h3{font-size:15px;color:var(--text-bright);margin-bottom:14px;display:flex;align-items:center;gap:8px;}
-.admin-section h3 svg{width:18px;height:18px;color:var(--purple);}
-.edit-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border);}
+.admin-section{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:16px;}
+.admin-section h3{font-size:14px;color:var(--text-bright);margin-bottom:12px;display:flex;align-items:center;gap:6px;}
+.admin-section h3 svg{width:16px;height:16px;color:var(--purple);}
+.edit-row{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border);flex-wrap:wrap;}
 .edit-row:last-child{border-bottom:none;}
-.edit-row input{flex:1;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;outline:none;}
+.edit-row input{flex:1;min-width:120px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px;outline:none;}
 .edit-row input:focus{border-color:var(--accent);}
-.edit-row label{font-size:12px;color:var(--text-dim);min-width:80px;}
-.upload-area{border:2px dashed var(--border-bright);border-radius:12px;padding:40px;text-align:center;cursor:pointer;transition:all 0.2s;}
+.edit-row label{font-size:11px;color:var(--text-dim);min-width:80px;}
+.upload-area{border:2px dashed var(--border-bright);border-radius:10px;padding:30px;text-align:center;cursor:pointer;transition:all 0.2s;}
 .upload-area:hover{border-color:var(--accent);background:var(--accent-soft);}
-.upload-area svg{width:40px;height:40px;color:var(--text-dim);margin-bottom:10px;}
-.upload-area p{color:var(--text-dim);font-size:14px;}
-.upload-progress{margin-top:12px;}
-.progress-bar{width:100%;height:6px;background:var(--bg-search);border-radius:3px;overflow:hidden;}
+.upload-area svg{width:32px;height:32px;color:var(--text-dim);margin-bottom:8px;}
+.upload-area p{color:var(--text-dim);font-size:13px;}
+.upload-progress{margin-top:10px;}
+.progress-bar{width:100%;height:4px;background:var(--bg-search);border-radius:2px;overflow:hidden;}
 .progress-fill{height:100%;background:var(--accent);transition:width 0.3s;}
-.user-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);}
+.user-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);flex-wrap:wrap;}
 .user-row:last-child{border-bottom:none;}
 .user-row .user-info{flex:1;}
-.user-row .user-name{font-size:14px;font-weight:500;color:var(--text-bright);}
-.user-row .user-role{font-size:12px;color:var(--text-dim);}
-.role-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:500;}
+.user-row .user-name{font-size:13px;font-weight:500;color:var(--text-bright);}
+.user-row .user-role{font-size:11px;color:var(--text-dim);}
+.role-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:500;}
 .role-badge.admin{background:var(--purple-soft);color:var(--purple);}
 .role-badge.user{background:var(--accent-soft);color:var(--accent);}
 </style>"""
@@ -616,13 +640,16 @@ body{font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;backgroun
     body = f"""</head>
 <body>
 <div class="header"><div class="header-inner">
-  <div class="logo" onclick="goHome()"><div class="logo-icon">{get_svg("package")}</div><div class="logo-text"><h1>软件库 <span class="scan-badge"><span class="dot"></span> Live</span></h1><span>Software Library</span></div></div>
-  <div class="search-box"><span class="search-icon">{get_svg("search")}</span><input type="text" id="searchInput" placeholder="搜索软件名..." autocomplete="off" oninput="onSearch(this.value)"></div>
+  <div class="logo" onclick="goHome()"><div class="logo-icon">{get_svg("package")}</div><div class="logo-text"><h1>软件库</h1></div></div>
+  <div class="search-box"><span class="search-icon">{get_svg("search")}</span><input type="text" id="searchInput" placeholder="搜索软件..." autocomplete="off" oninput="onSearch(this.value)"></div>
+  <div class="cat-filter">
+    <select id="catSelect" onchange="selectCategory(this.value)"><option value="all">全部分类 ({len(categories)})</option></select>
+  </div>
   <div class="stats"><div class="stat-item"><div class="num" id="statCount">{total_files}</div><div class="label">文件</div></div><div class="stat-item"><div class="num">{len(categories)}</div><div class="label">分类</div></div><div class="stat-item"><div class="num">{total_size_text}</div><div class="label">总量</div></div></div>
   <div class="header-btns" id="headerBtns"></div>
 </div></div>
 <div class="container" id="container"></div>
-<div class="footer"><p>软件库 · 共 {total_files} 个文件 · 总计 {total_size_text}</p><p style="margin-top:4px;">最后更新: {now_str}</p></div>
+<div class="footer"><p>软件库 · 共 {total_files} 个文件 · 总计 {total_size_text}</p><p style="margin-top:2px;">最后更新: {now_str}</p></div>
 <div id="modalContainer"></div>
 """
 
@@ -657,27 +684,44 @@ function renderHeaderBtns(){
   const c=document.getElementById('headerBtns');
   if(!SESSION){
     if(HAS_USERS){
-      c.innerHTML='<button class="header-btn" onclick="showLogin()">'+svg('lock',14)+' 登录</button>';
+      c.innerHTML='<button class="header-btn" onclick="showLogin()">'+svg('lock',12)+' 登录</button>';
     }else{
-      c.innerHTML='<button class="header-btn" onclick="showRegister()">'+svg('plus',14)+' 注册管理员</button>';
+      c.innerHTML='<button class="header-btn primary" onclick="showRegister()">'+svg('user',12)+' 注册管理员</button>';
     }
-  }else{
-    let h='<button class="header-btn" onclick="doUpload()">'+svg('upload',14)+' 上传</button>';
-    if(SESSION.role==='admin')h+='<button class="header-btn admin-btn" onclick="goAdmin()">'+svg('settings',14)+' 管理</button>';
-    h+='<button class="header-btn" onclick="goHome()">'+svg('package',14)+' 首页</button>';
-    h+='<button class="header-btn danger" onclick="doLogout()">'+svg('logout',14)+' 退出</button>';
-    c.innerHTML=h;
+    return;
   }
+  // Logged in
+  let h='<div class="dropdown" id="userDropdown">';
+  h+='<button class="header-btn" onclick="toggleDropdown()">'+svg('user',12)+' '+esc(SESSION.username)+' '+svg('chevron',10)+'</button>';
+  h+='<div class="dropdown-menu" id="dropdownMenu">';
+  h+='<button onclick="doUpload()">'+svg('upload',12)+' 上传文件</button>';
+  if(SESSION.role==='admin'){
+    h+='<button onclick="goAdmin()">'+svg('settings',12)+' 管理面板</button>';
+    h+='<button onclick="doRescan()">'+svg('refresh',12)+' 重新扫描</button>';
+  }
+  h+='<div class="divider"></div>';
+  h+='<button onclick="doLogout()" style="color:var(--red)">'+svg('logout',12)+' 退出</button>';
+  h+='</div></div>';
+  c.innerHTML=h;
 }
+
+function toggleDropdown(){
+  const m=document.getElementById('dropdownMenu');
+  m.classList.toggle('show');
+}
+document.addEventListener('click',function(e){
+  const d=document.getElementById('userDropdown');
+  if(d&&!d.contains(e.target)){const m=document.getElementById('dropdownMenu');if(m)m.classList.remove('show');}
+});
 
 function showLogin(){
   const mc=document.getElementById('modalContainer');
-  mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>'+svg('lock',22)+' 登录</h2><div class="modal-error" id="loginErr"></div><div class="form-group"><label>用户名</label><input type="text" id="loginUser" placeholder="输入用户名" autocomplete="username"></div><div class="form-group"><label>密码</label><input type="password" id="loginPass" placeholder="输入密码" autocomplete="current-password" onkeydown="if(event.key===\\'Enter\\')doLogin()"></div><div class="modal-btns"><button class="btn btn-primary" style="flex:1" onclick="doLogin()">'+svg('lock',14)+' 登录</button><button class="btn btn-back" onclick="closeModal()">取消</button></div></div></div>';
+  mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>'+svg('lock',20)+' 登录</h2><div class="modal-error" id="loginErr"></div><div class="form-group"><label>用户名</label><input type="text" id="loginUser" placeholder="输入用户名" autocomplete="username"></div><div class="form-group"><label>密码</label><input type="password" id="loginPass" placeholder="输入密码" autocomplete="current-password" onkeydown="if(event.key===\\'Enter\\')doLogin()"></div><div class="modal-btns"><button class="btn btn-primary" style="flex:1" onclick="doLogin()">'+svg('lock',12)+' 登录</button><button class="btn btn-back" onclick="closeModal()">取消</button></div></div></div>';
   setTimeout(()=>document.getElementById('loginUser').focus(),100);
 }
 function showRegister(){
   const mc=document.getElementById('modalContainer');
-  mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>'+svg('user',22)+' 注册管理员</h2><p style="font-size:13px;color:var(--text-dim);margin-bottom:16px">首次使用，请创建管理员账号。此账号可管理用户和软件。</p><div class="modal-error" id="regErr"></div><div class="form-group"><label>用户名</label><input type="text" id="regUser" placeholder="创建用户名"></div><div class="form-group"><label>密码</label><input type="password" id="regPass" placeholder="创建密码"></div><div class="form-group"><label>确认密码</label><input type="password" id="regPass2" placeholder="再次输入密码" onkeydown="if(event.key===\\'Enter\\')doRegister()"></div><div class="modal-btns"><button class="btn btn-primary" style="flex:1" onclick="doRegister()">'+svg('plus',14)+' 注册</button></div></div></div>';
+  mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>'+svg('user',20)+' 注册管理员</h2><p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">首次使用，请创建管理员账号。</p><div class="modal-error" id="regErr"></div><div class="form-group"><label>用户名</label><input type="text" id="regUser" placeholder="创建用户名"></div><div class="form-group"><label>密码</label><input type="password" id="regPass" placeholder="创建密码"></div><div class="form-group"><label>确认密码</label><input type="password" id="regPass2" placeholder="再次输入密码" onkeydown="if(event.key===\\'Enter\\')doRegister()"></div><div class="modal-btns"><button class="btn btn-primary" style="flex:1" onclick="doRegister()">'+svg('plus',12)+' 注册</button></div></div></div>';
   setTimeout(()=>document.getElementById('regUser').focus(),100);
 }
 function closeModal(){document.getElementById('modalContainer').innerHTML='';}
@@ -697,7 +741,7 @@ async function doRegister(){
   if(!u||!p){document.getElementById('regErr').style.display='block';document.getElementById('regErr').textContent='请填写用户名和密码';return;}
   if(p!==p2){document.getElementById('regErr').style.display='block';document.getElementById('regErr').textContent='两次密码不一致';return;}
   const r=await api('/api/register',{method:'POST',body:{username:u,password:p}});
-  if(r.success){SESSION=r.session;setCookie('session',r.session,1);closeModal();renderHeaderBtns();render();showToast('注册成功，欢迎！');}
+  if(r.success){SESSION=r.session;setCookie('session',r.session,1);closeModal();renderHeaderBtns();render();showToast('注册成功！');}
   else{document.getElementById('regErr').style.display='block';document.getElementById('regErr').textContent=r.error||'注册失败';}
 }
 function doLogout(){delCookie('session');SESSION=null;renderHeaderBtns();render();showToast('已退出');}
@@ -712,9 +756,11 @@ function getFiltered(){let d=ALL_DATA;if(currentCat!=='all')d=d.filter(s=>s.cate
 
 function renderCatSelect(){
   const cats=['all',...new Set(ALL_DATA.map(s=>s.category))];
+  const sel=document.getElementById('catSelect');
+  if(!sel)return;
   let opts='<option value="all">全部分类 ('+ALL_DATA.length+')</option>';
   for(const c of cats){if(c==='all')continue;const n=ALL_DATA.filter(s=>s.category===c).length;opts+='<option value="'+esc(c)+'"'+(currentCat===c?' selected':'')+'>'+esc(c)+' ('+n+')</option>';}
-  return '<div class="cat-select"><select onchange="selectCategory(this.value)">'+opts+'</select></div>';
+  sel.innerHTML=opts;
 }
 
 function render(){
@@ -725,21 +771,22 @@ function render(){
 }
 
 function renderHome(c){
-  let h=renderCatSelect();
+  renderCatSelect();
   const d=getFiltered();
   document.getElementById('statCount').textContent=d.reduce((a,s)=>a+s.versions.length,0);
-  if(d.length===0){h+='<div class="no-results">'+svg('search',48)+'<p style="margin-top:16px">没有找到匹配的文件</p></div>';c.innerHTML=h;return;}
+  if(d.length===0){c.innerHTML='<div class="no-results">'+svg('search',40)+'<p style="margin-top:12px;">没有找到匹配的软件</p></div>';return;}
   const grouped={};d.forEach(s=>{if(!grouped[s.category])grouped[s.category]=[];grouped[s.category].push(s);});
+  let h='';
   for(const cat of Object.keys(grouped).sort()){
     const items=grouped[cat];
-    h+='<div class="section"><div class="section-header">'+svg(CAT_ICONS[cat]||'box',22)+'<h2>'+esc(cat)+' ('+items.length+')</h2></div><div class="grid">';
+    h+='<div class="section"><div class="section-header">'+svg(CAT_ICONS[cat]||'box',18)+'<h2>'+esc(cat)+' ('+items.length+')</h2></div><div class="grid">';
     for(const sw of items){
       const vc=sw.versions.length;const latest=sw.versions[0]||{};
-      h+='<div class="card" onclick="goVersion(\\''+esc(sw.name).replace(/'/g,"\\\\'")+'\\')"><div class="card-top"><div class="card-icon">'+svg(sw.icon,26)+'</div><div class="card-info"><div class="card-title">'+esc(sw.name)+'</div><div class="card-desc">'+esc(sw.desc)+'</div></div></div><div class="card-meta"><span class="meta-tag type">'+(latest.fileType||'')+'</span><span class="meta-tag size">'+(latest.sizeText||'')+'</span>';
+      h+='<div class="card" onclick="goVersion(\\''+esc(sw.name).replace(/'/g,"\\\\'")+'\\')"><div class="card-top"><div class="card-icon">'+svg(sw.icon,20)+'</div><div class="card-info"><div class="card-title">'+esc(sw.name)+'</div><div class="card-desc">'+esc(sw.desc)+'</div></div></div><div class="card-meta"><span class="meta-tag type">'+(latest.fileType||'')+'</span><span class="meta-tag size">'+(latest.sizeText||'')+'</span>';
       if(latest.date)h+='<span class="meta-tag date">'+latest.date+'</span>';
       h+='</div><div class="card-footer">';
-      if(sw.showOfficial&&sw.official)h+='<span class="official-badge">'+svg('external',11)+' 官网下载</span>';
-      h+='<span class="card-versions-count">'+svg('layers',14)+vc+' 个版本</span><span class="card-chevron">'+svg('chevron',16)+'</span></div></div>';
+      if(sw.showOfficial&&(sw.official||sw.customOfficial))h+='<span class="official-badge">'+svg('external',10)+' 官网</span>';
+      h+='<span class="card-versions-count">'+svg('layers',12)+vc+' 个版本</span><span class="card-chevron">'+svg('chevron',14)+'</span></div></div>';
     }
     h+='</div></div>';
   }
@@ -749,36 +796,49 @@ function renderHome(c){
 function renderVersionPage(c){
   const sw=ALL_DATA.find(s=>s.name===currentSoftware);
   if(!sw){goHome();return;}
-  let h='<div class="breadcrumb"><a onclick="goHome()">'+svg('back',14)+' 首页</a> / <span>'+esc(sw.name)+'</span></div>';
-  h+='<div class="section"><div class="section-header">'+svg(sw.icon,22)+'<h2>'+esc(sw.name)+'</h2>';
-  if(sw.showOfficial&&sw.official)h+='<a class="btn btn-official" href="'+esc(sw.official)+'" target="_blank">'+svg('external',14)+' 去官网下载最新版</a>';
-  h+='</div><div style="font-size:13px;color:var(--text-dim);margin-bottom:16px">'+esc(sw.desc)+'</div><div class="version-list">';
+  let h='<div class="breadcrumb"><a onclick="goHome()">'+svg('back',12)+' 首页</a> / <span>'+esc(sw.name)+'</span></div>';
+  h+='<div class="section"><div class="section-header">'+svg(sw.icon,20)+'<h2>'+esc(sw.name)+'</h2>';
+  // Official download buttons
+  if(sw.showOfficial){
+    const officialUrl = sw.customOfficial || sw.official;
+    if(officialUrl){
+      h+='<a class="btn btn-external" href="'+esc(officialUrl)+'" target="_blank">'+svg('external',12)+' 官网下载</a>';
+    }
+  }
+  h+='</div><div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">'+esc(sw.desc)+'</div><div class="version-list">';
   for(const v of sw.versions){
     const dlUrl='/download/'+encodeURIComponent(v.path);
-    h+='<div class="version-item"><div class="card-icon" style="width:40px;height:40px">'+svg(sw.icon,20)+'</div><div class="version-info"><div class="version-number">'+esc(v.filename)+'</div><div class="version-meta">'+esc(v.fileType)+' · '+v.sizeText+(v.date?(' · '+v.date):'')+'</div></div><a class="btn btn-download" href="'+dlUrl+'" download="'+esc(v.filename)+'">'+svg('download',14)+' 下载</a></div>';
+    h+='<div class="version-item"><div class="card-icon" style="width:32px;height:32px">'+svg(sw.icon,16)+'</div><div class="version-info"><div class="version-filename">'+esc(v.filename)+'</div><div class="version-meta">'+esc(v.fileType)+' · '+v.sizeText+(v.date?(' · '+v.date):'')+'</div></div><a class="btn btn-download" href="'+dlUrl+'" download="'+esc(v.filename)+'">'+svg('download',12)+' 下载</a></div>';
   }
   h+='</div></div>';
+  // Show custom download URL if set
+  if(sw.customOfficial){
+    h+='<div style="font-size:11px;color:var(--text-dim);margin-top:8px;text-align:center;">📥 自定义下载: <a href="'+esc(sw.customOfficial)+'" target="_blank" style="color:var(--accent)">'+esc(sw.customOfficial)+'</a></div>';
+  }
   c.innerHTML=h;
 }
 
 function renderAdmin(c){
-  if(!SESSION||SESSION.role!=='admin'){c.innerHTML='<div class="no-results">'+svg('lock',48)+'<p style="margin-top:16px">需要管理员权限</p></div>';return;}
+  if(!SESSION||SESSION.role!=='admin'){c.innerHTML='<div class="no-results">'+svg('lock',40)+'<p style="margin-top:12px;">需要管理员权限</p></div>';return;}
   let h='';
   // Software management
-  h+='<div class="admin-section"><h3>'+svg('package',18)+' 软件管理</h3>';
-  h+='<p style="color:var(--text-dim);font-size:13px;margin-bottom:14px">编辑软件的官网下载地址和显示设置。扫描结果自动生成，此处的编辑会覆盖默认值。</p>';
+  h+='<div class="admin-section"><h3>'+svg('package',16)+' 软件管理</h3><p style="color:var(--text-dim);font-size:12px;margin-bottom:10px;">为软件设置官网下载地址，用户可一键跳转下载。</p>';
   for(const sw of ALL_DATA){
-    h+='<div class="edit-row"><label>'+esc(sw.name)+'</label><input type="text" id="official_'+sw.name.replace(/[^a-zA-Z0-9]/g,'_')+'" value="'+esc(sw.official||'')+'" placeholder="官网下载地址">';
-    h+='<button class="btn btn-sm '+(sw.showOfficial?'btn-danger':'btn-primary')+'" onclick="toggleOfficial(\\''+esc(sw.name).replace(/'/g,"\\\\'")+'\\')">'+(sw.showOfficial?'取消官网':'标记官网')+'</button>';
-    h+='<button class="btn btn-sm btn-primary" onclick="saveOfficial(\\''+esc(sw.name).replace(/'/g,"\\\\'")+'\\')">'+svg('save',14)+'</button></div>';
+    const id=sw.name.replace(/[^a-zA-Z0-9]/g,'_');
+    h+='<div class="edit-row"><label title="'+esc(sw.name)+'">'+esc(sw.name)+'</label>';
+    h+='<input type="text" id="official_'+id+'" value="'+esc(sw.customOfficial||sw.official||'')+'" placeholder="官网下载地址" style="flex:2;">';
+    h+='<button class="btn btn-sm '+(sw.showOfficial?'btn-danger':'btn-primary')+'" onclick="toggleOfficial(\\''+esc(sw.name).replace(/'/g,"\\\\'")+'\\')">'+(sw.showOfficial?'隐藏':'显示')+'</button>';
+    h+='<button class="btn btn-sm btn-primary" onclick="saveOfficial(\\''+esc(sw.name).replace(/'/g,"\\\\'")+'\\')">'+svg('save',12)+'</button>';
+    h+='<button class="btn btn-sm btn-external" onclick="testOfficial(\\''+esc(sw.name).replace(/'/g,"\\\\'")+'\\')">'+svg('external',12)+'</button>';
+    h+='</div>';
   }
   h+='</div>';
   // User management
-  h+='<div class="admin-section"><h3>'+svg('users',18)+' 用户管理</h3><div id="userList">加载中...</div>';
-  h+='<div class="edit-row" style="margin-top:12px"><input type="text" id="newUser" placeholder="新用户名" style="flex:1"><input type="password" id="newPass" placeholder="密码" style="flex:1"><select id="newRole" style="padding:6px;border:1px solid var(--border);border-radius:6px;font-size:13px"><option value="user">普通用户</option><option value="admin">管理员</option></select><button class="btn btn-sm btn-primary" onclick="addUser()">'+svg('plus',14)+' 添加</button></div>';
+  h+='<div class="admin-section"><h3>'+svg('users',16)+' 用户管理</h3><div id="userList">加载中...</div>';
+  h+='<div class="edit-row" style="margin-top:10px;"><input type="text" id="newUser" placeholder="新用户名" style="flex:1;"><input type="password" id="newPass" placeholder="密码" style="flex:1;"><select id="newRole" style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px;"><option value="user">普通用户</option><option value="admin">管理员</option></select><button class="btn btn-sm btn-primary" onclick="addUser()">'+svg('plus',12)+' 添加</button></div>';
   h+='</div>';
-  // Rescan
-  h+='<div class="admin-section"><h3>'+svg('refresh',18)+' 扫描管理</h3><button class="btn btn-primary" id="rescanBtn2" onclick="doRescan()">'+svg('refresh',14)+' 立即重新扫描</button></div>';
+  // System
+  h+='<div class="admin-section"><h3>'+svg('refresh',16)+' 系统管理</h3><button class="btn btn-primary" onclick="doRescan()">'+svg('refresh',12)+' 重新扫描</button></div>';
   c.innerHTML=h;
   loadUserList();
 }
@@ -788,11 +848,11 @@ async function loadUserList(){
   if(!r.success)return;
   let h='';
   for(const u of r.users){
-    h+='<div class="user-row"><div class="user-info"><div class="user-name">'+esc(u.username)+'</div><div class="user-role">'+esc(u.created)+'</div></div><span class="role-badge '+u.role+'">'+(u.role==='admin'?'管理员':'普通用户')+'</span>';
+    h+='<div class="user-row"><div class="user-info"><div class="user-name">'+esc(u.username)+'</div><div class="user-role">'+esc(u.created||'')+'</div></div><span class="role-badge '+u.role+'">'+(u.role==='admin'?'管理员':'普通用户')+'</span>';
     if(u.username!==SESSION.username)h+='<button class="btn btn-sm btn-danger" onclick="delUser(\\''+esc(u.username).replace(/'/g,"\\\\'")+'\\')">删除</button>';
     h+='</div>';
   }
-  document.getElementById('userList').innerHTML=h||'<p style="color:var(--text-dim);font-size:13px">暂无其他用户</p>';
+  document.getElementById('userList').innerHTML=h||'<p style="color:var(--text-dim);font-size:12px;">暂无其他用户</p>';
 }
 
 async function addUser(){
@@ -819,17 +879,28 @@ async function toggleOfficial(name){
   else{showToast(r.error||'操作失败');}
 }
 async function saveOfficial(name){
-  const inp=document.getElementById('official_'+name.replace(/[^a-zA-Z0-9]/g,'_'));
+  const id=name.replace(/[^a-zA-Z0-9]/g,'_');
+  const inp=document.getElementById('official_'+id);
   const url=inp?inp.value.trim():'';
-  const r=await api('/api/admin/software',{method:'PUT',body:{name:name,official:url,showOfficial:true}});
-  if(r.success){const sw=ALL_DATA.find(s=>s.name===name);if(sw){sw.official=url;sw.showOfficial=true;}showToast('已保存官网地址');}
-  else{showToast(r.error||'保存失败');}
+  const r=await api('/api/admin/software',{method:'PUT',body:{name:name,customOfficial:url,showOfficial:true}});
+  if(r.success){
+    const sw=ALL_DATA.find(s=>s.name===name);
+    if(sw){sw.customOfficial=url;sw.showOfficial=true;}
+    showToast('已保存官网地址');
+    renderAdmin(document.getElementById('container'));
+  }else{showToast(r.error||'保存失败');}
+}
+async function testOfficial(name){
+  const sw=ALL_DATA.find(s=>s.name===name);
+  if(!sw)return;
+  const url=sw.customOfficial||sw.official;
+  if(url){window.open(url,'_blank');}else{showToast('该软件未设置官网地址');}
 }
 
 function doUpload(){
   if(!SESSION){showToast('请先登录');return;}
   const mc=document.getElementById('modalContainer');
-  mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal" style="max-width:500px"><h2>'+svg('upload',22)+' 上传文件</h2><div class="upload-area" id="uploadArea" onclick="document.getElementById(\\'fileInput\\').click()">'+svg('upload',40)+'<p>点击或拖拽文件到此处上传</p></div><input type="file" id="fileInput" style="display:none" onchange="handleFile(this.files[0])"><div id="uploadProgress" style="display:none"><div class="upload-progress"><div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div><p style="text-align:center;margin-top:8px;font-size:13px;color:var(--text-dim)" id="uploadStatus">上传中...</p></div></div><div class="modal-btns"><button class="btn btn-back" onclick="closeModal()">关闭</button></div></div></div>';
+  mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal" style="max-width:480px;"><h2>'+svg('upload',20)+' 上传文件</h2><div class="upload-area" id="uploadArea" onclick="document.getElementById(\\'fileInput\\').click()">'+svg('upload',32)+'<p>点击或拖拽文件到此处上传</p></div><input type="file" id="fileInput" style="display:none" onchange="handleFile(this.files[0])"><div id="uploadProgress" style="display:none"><div class="upload-progress"><div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div><p style="text-align:center;margin-top:6px;font-size:12px;color:var(--text-dim)" id="uploadStatus">上传中...</p></div></div><div class="modal-btns"><button class="btn btn-back" onclick="closeModal()">关闭</button></div></div></div>';
   const area=document.getElementById('uploadArea');
   area.ondragover=function(e){e.preventDefault();this.style.borderColor='var(--accent)';this.style.background='var(--accent-soft)';};
   area.ondragleave=function(e){e.preventDefault();this.style.borderColor='var(--border-bright)';this.style.background='transparent';};
@@ -852,14 +923,16 @@ function handleFile(file){
 }
 
 async function doRescan(){
-  const btn=document.getElementById('rescanBtn2')||document.getElementById('rescanBtn');
+  if(!SESSION){showToast('请先登录');return;}
+  const btn=document.querySelector('.header-btn:contains("重新扫描")')||document.querySelector('button[onclick*="doRescan"]');
   if(!btn)return;
-  btn.classList.add('spinning');btn.innerHTML=svg('refresh',14)+' 扫描中';
+  const orig=btn.innerHTML;
+  btn.disabled=true;btn.innerHTML=svg('refresh',12)+' 扫描中';
   try{
     const r=await api('/api/rescan',{method:'POST'});
     if(r.success){showToast('扫描完成: '+r.totalFiles+' 个文件');setTimeout(()=>location.reload(),1500);}
-    else{showToast('扫描失败');btn.classList.remove('spinning');btn.innerHTML=svg('refresh',14)+' 重新扫描';}
-  }catch(e){showToast('请求失败');btn.classList.remove('spinning');btn.innerHTML=svg('refresh',14)+' 重新扫描';}
+    else{showToast('扫描失败');btn.disabled=false;btn.innerHTML=orig;}
+  }catch(e){showToast('请求失败');btn.disabled=false;btn.innerHTML=orig;}
 }
 
 async function loadData(){
@@ -906,7 +979,6 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
     def _get_session(self):
         token = self.headers.get('X-Session', '')
         if not token:
-            # Also check cookie
             cookie = self.headers.get('Cookie', '')
             m = re.search(r'session=([a-f0-9]+)', cookie)
             if m:
@@ -1091,11 +1163,9 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
     def _handle_upload(self):
         try:
             ctype = self.headers.get('Content-Type', '')
-            # Parse multipart form data
             if 'multipart/form-data' not in ctype:
                 self._serve_json({"success": False, "error": "需要文件上传"})
                 return
-            # Simple multipart parser
             boundary = ctype.split('boundary=')[1].encode()
             remaining = int(self.headers.get('Content-Length', 0))
             if remaining > MAX_UPLOAD_SIZE:
@@ -1107,15 +1177,12 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             file_data = None
             for part in parts:
                 if b'Content-Disposition' in part and b'filename=' in part:
-                    # Extract filename
                     disp_match = re.search(rb'filename="([^"]+)"', part)
                     if disp_match:
                         filename = disp_match.group(1).decode('utf-8', errors='replace')
-                    # Extract file data (after double newline)
                     idx = part.find(b'\r\n\r\n')
                     if idx >= 0:
                         file_data = part[idx+4:]
-                        # Strip trailing \r\n
                         if file_data.endswith(b'\r\n'):
                             file_data = file_data[:-2]
             if not filename or file_data is None:
@@ -1214,7 +1281,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             if name not in config["software"]:
                 config["software"][name] = {}
             sw_cfg = config["software"][name]
-            for key in ["category", "icon", "desc", "official", "showOfficial", "customOrder"]:
+            for key in ["category", "icon", "desc", "official", "showOfficial", "customOfficial", "downloadUrl"]:
                 if key in data:
                     sw_cfg[key] = data[key]
             save_json(CONFIG_FILE, config)
@@ -1268,7 +1335,7 @@ def run_server(port):
         print("ERROR: Cannot find available port!")
         return
     print(f"\n{'='*55}")
-    print(f"  Software Library Manager v4 Running")
+    print(f"  Software Library Manager v5 Running")
     print(f"  URL: http://0.0.0.0:{port}")
     print(f"  Root: {ROOT_DIR}")
     print(f"  Data: {DATA_DIR}")
