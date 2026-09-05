@@ -8,11 +8,10 @@ services:
     ports:
       - "8899:8899"
     volumes:
-      # 共享数据目录 -> /data (只读)
-      # 左边改成你极空间上的实际路径
-      - /tmp/zfsv3/nvme17/13040705017/data/共享数据:/data:ro
-      # 生成文件持久化
-      - /tmp/zfsv3/nvme17/13040705017/data/共享数据/logs:/app/data
+      # 软件文件目录：程序需要写入 uploads，因此不要使用 :ro
+      - /tmp/zfsv3/nvme17/13040705017/data/共享数据:/data
+      # 程序配置、用户、扫描结果持久化
+      - /tmp/zfsv3/nvme17/13040705017/data/software-library:/app/data
     environment:
       - LIB_ROOT_DIR=/data
       - LIB_PORT=8899
