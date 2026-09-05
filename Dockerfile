@@ -14,7 +14,8 @@ ENV LIB_ROOT_DIR=/data \
     LIB_WATCH_INTERVAL=3600 \
     PYTHONUNBUFFERED=1
 
-RUN mkdir -p /app/data
+RUN pip install --no-cache-dir requests \
+    && mkdir -p /app/data
 
 EXPOSE 8899
 
