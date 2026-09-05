@@ -1,12 +1,10 @@
 FROM python:3.12-slim
 
 LABEL maintainer="software-library"
-LABEL description="Software Library v7 - searchable categorized web interface for NAS"
+LABEL description="Software Library v8 - standalone searchable software mirror"
 
 WORKDIR /app
-
 COPY app.py /app/app.py
-COPY v7.py /app/v7.py
 
 ENV LIB_ROOT_DIR=/data \
     LIB_PORT=8899 \
@@ -15,11 +13,11 @@ ENV LIB_ROOT_DIR=/data \
     PYTHONUNBUFFERED=1
 
 RUN pip install --no-cache-dir requests \
-    && mkdir -p /app/data
+    && mkdir -p /app/data /data
 
 EXPOSE 8899
 
 HEALTHCHECK --interval=60s --timeout=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8899/index.html')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8899/')" || exit 1
 
-CMD ["python", "v7.py", "--watch"]
+CMD ["python", "app.py", "--watch"]
