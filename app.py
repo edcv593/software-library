@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Software Library Manager v8
-===========================
-Standalone final version: scanner, responsive UI, authentication, admin panel,
-user management, upload, per-file official download URL and remote retention.
+Software Library Manager v6
+==========================
+Scans NAS directory for software files, provides a searchable web UI
+with user authentication, admin panel, file upload, remote URL fetch
+(download-to-library) and download system.
 
 Environment variables:
   LIB_ROOT_DIR       Root directory to scan (default: /data)
   LIB_PORT           Web server port (default: 8899)
-  LIB_DATA_DIR       Persistent application data (default: /app/data)
+  LIB_DATA_DIR       Generated files directory (default: /app/data)
+  LIB_UPLOAD_DIR     Upload / fetched files directory (default: <LIB_DATA_DIR>/uploads)
   LIB_WATCH_INTERVAL Auto-rescan interval in seconds (default: 3600)
+
+Only the Python standard library is required (no pip packages).
 """
+
 import os
 import re
 import json
@@ -22,22 +27,26 @@ import threading
 import http.server
 import socketserver
 import urllib.parse
-import shutil
-import requests
+import urllib.request
 from datetime import datetime
+
+# ============================================================
+# Configuration
+# ============================================================
 
 ROOT_DIR = os.environ.get("LIB_ROOT_DIR", "/data")
 PORT = int(os.environ.get("LIB_PORT", "8899"))
 DATA_DIR = os.environ.get("LIB_DATA_DIR", "/app/data")
+UPLOAD_DIR = os.environ.get("LIB_UPLOAD_DIR", os.path.join(DATA_DIR, "uploads"))
 WATCH_INTERVAL = int(os.environ.get("LIB_WATCH_INTERVAL", "3600"))
 
 HTML_FILE = os.path.join(DATA_DIR, "index.html")
 SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
-UPLOAD_DIR = os.path.join(ROOT_DIR, "uploads")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-DOWNLOAD_CACHE = os.path.join(DATA_DIR, "download_cache")
+
+UPLOAD_URL_PREFIX = "uploads/"  # web path prefix for files stored in UPLOAD_DIR
 
 SUPPORTED_EXTENSIONS = {
     ".exe": "EXE", ".msi": "MSI", ".iso": "ISO", ".img": "IMG",
@@ -54,10 +63,14 @@ SKIP_DIRS = {"logs", "log", "工作文件", "文档", ".workbuddy-ai", "$RECYCLE
              "tmp", "temp", "cache", "__pycache__", "node_modules", "uploads"}
 SKIP_FILES = {"README.md", "index.html", "software_library.json",
               "update_library.py", "app.py", "deploy.sh", "启动软件库.bat",
-              "config.json", "scan_result.json", "users.json"}
+              "config.json", "scan_result.json", "users.json", "server.log"}
 
-MAX_UPLOAD_SIZE = 500 * 1024 * 1024
-MAX_DOWNLOAD_SIZE = 2 * 1024 * 1024 * 1024
+MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500MB
+MAX_DOWNLOAD_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
+
+# ============================================================
+# Software knowledge base
+# ============================================================
 
 SOFTWARE_DB = {
     "vmware": {"name":"VMware Workstation","category":"虚拟化","icon":"vmware","desc":"VMware 虚拟机工作站","official":"https://www.vmware.com"},
@@ -75,8 +88,9 @@ SOFTWARE_DB = {
     "openwrt": {"name":"OpenWrt","category":"路由器/软路由","icon":"router","desc":"OpenWrt 软路由固件","official":"https://openwrt.org"},
     "istoreos": {"name":"iStoreOS","category":"路由器/软路由","icon":"router","desc":"iStoreOS 软路由系统","official":"https://www.istoreos.com"},
     "ikuai": {"name":"iKuai 爱快","category":"路由器/软路由","icon":"router","desc":"爱快流控路由系统","official":"https://www.ikuai8.com"},
-    "immortalwrt": {"name":"ImmortalWrt","category":"路由器/软路由","icon":"router","desc":"ImmortalWrt 软路由系统","official":"https://immortalwrt.org"},
+    "immortalwrt": {"name":"ImmortalWrt","category":"路由器/软路由","icon":"router","desc":"ImmortalWrt 软路由固件","official":"https://immortalwrt.org"},
     "sql server": {"name":"SQL Server","category":"数据库","icon":"database","desc":"Microsoft SQL Server","official":"https://www.microsoft.com/sql-server"},
+    "sqlserver": {"name":"SQL Server","category":"数据库","icon":"database","desc":"Microsoft SQL Server","official":"https://www.microsoft.com/sql-server"},
     "mysql": {"name":"MySQL","category":"数据库","icon":"database","desc":"MySQL 数据库","official":"https://www.mysql.com"},
     "redis": {"name":"Redis","category":"数据库","icon":"database","desc":"Redis 内存数据库","official":"https://redis.io"},
     "office": {"name":"Microsoft Office","category":"办公软件","icon":"office","desc":"Microsoft Office 办公套件","official":"https://www.microsoft.com/microsoft-365"},
@@ -91,6 +105,7 @@ SOFTWARE_DB = {
     "mobaxterm": {"name":"MobaXterm","category":"开发工具","icon":"terminal","desc":"MobaXterm 终端工具","official":"https://mobaxterm.mobatek.net"},
     "xshell": {"name":"Xshell Plus","category":"开发工具","icon":"terminal","desc":"Xshell 终端模拟器","official":"https://www.xshell.com"},
     "sublime": {"name":"Sublime Text","category":"开发工具","icon":"code","desc":"Sublime Text 代码编辑器","official":"https://www.sublimetext.com"},
+    "vscode": {"name":"Visual Studio Code","category":"开发工具","icon":"code","desc":"Visual Studio Code 编辑器","official":"https://code.visualstudio.com"},
     "diskgenius": {"name":"DiskGenius","category":"系统工具","icon":"disk","desc":"DiskGenius 磁盘分区管理","official":"https://www.diskgenius.com"},
     "ultraiso": {"name":"UltraISO","category":"系统工具","icon":"disk","desc":"UltraISO 光盘镜像工具","official":"https://www.ultraiso.com"},
     "winrar": {"name":"WinRAR","category":"系统工具","icon":"archive","desc":"WinRAR 压缩解压工具","official":"https://www.rarlab.com"},
@@ -124,324 +139,1414 @@ SVG_ICONS = {
     "server":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="6" rx="1"/><rect x="2" y="15" width="20" height="6" rx="1"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>',
     "nas":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="7" y1="8" x2="7" y2="8"/><line x1="7" y1="12" x2="7" y2="12"/><line x1="7" y1="16" x2="7" y2="16"/><line x1="11" y1="8" x2="17" y2="8"/><line x1="11" y1="12" x2="17" y2="12"/><line x1="11" y1="16" x2="17" y2="16"/></svg>',
     "windows":'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 5.5l8.5-1.2v8.2H3V5.5zm0 13l8.5 1.2v-8.2H3v7zm9.5 1.3L21 21V13h-8.5v6.8zm0-15.6V11H21V3l-8.5 1.2z"/></svg>',
-    "linux":'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C8 2 7 6 7 9c0 2-2 4-2 7 0 3 3 4 7 4s7-1 7-4c0-3-2-5-2-7 0-3-1-7-5-7zM8 17c1-1 2-1 4-1s3 0 4 1c-1 1-2 1-4 1s-3 0-4-1z"/></svg>',
-    "router":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="8" width="18" height="10" rx="2"/><path d="M7 8l2-4M17 8l-2-4M7 13h.01M11 13h.01M15 13h.01M19 13h.01"/></svg>',
-    "database":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 2 4 3 8 3s8-1 8-3V5M4 12v7c0 2 4 3 8 3s8-1 8-3v-7"/></svg>',
-    "code":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 9l-4 3 4 3M16 9l4 3-4 3M14 5l-4 14"/></svg>',
-    "wrench":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a5 5 0 0 0-6.4 6.4L3 18l3 3 5.3-5.3a5 5 0 0 0 6.4-6.4L14 12l-2-2 2.7-3.7z"/></svg>',
-    "network":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="M8.5 10.5l7-3M8.5 13.5l7 3"/></svg>',
-    "browser":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg>',
-    "office":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 4l14 3v10l-14 3V4zM9 9v6M13 10v4"/></svg>',
-    "adobe":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19L10 5l6 14M7 14h6M14 5l6 14"/></svg>',
-    "media":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M10 9l5 3-5 3V9z"/></svg>',
-    "remote":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
-    "key":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8 2 2-2 2 2 2-2 2-2-2-4 4"/></svg>',
-    "driver":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
-    "box":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7l9-4 9 4-9 4-9-4zM3 7v10l9 4 9-4V7M12 11v10"/></svg>',
-    "archive":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M8 5v4h8V5M10 13h4"/></svg>',
-    "usb":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v14M12 7l-3-3M12 7l3-3M8 17l-3 3M16 17l3 3"/><circle cx="8" cy="20" r="1"/><circle cx="16" cy="20" r="1"/></svg>',
-    "trash":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></svg>',
-    "disk":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>',
-    "java":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 18c4 2 8 0 8-2M9 15c-2 2 6 3 7-1M12 3c3 3-2 4 1 6"/></svg>',
-    "python":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3c-4 0-5 2-5 5v3h6v2H7c-3 0-4 2-4 4s1 4 4 4h3v-3H7M12 3v3h3c3 0 4 2 4 4v4c0 3-2 4-5 4h-2v3h3c4 0 5-2 5-5v-6c0-4-2-7-6-7h-2z"/></svg>',
-    "pdf":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h9l4 4v14H6zM15 3v5h5"/><path d="M8 17h2M8 13h6"/></svg>',
-    "screenshot":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><circle cx="12" cy="12" r="3"/></svg>',
+    "linux":'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C9 2 8 4 8 6c0 1-1 2-1.5 3.5C6 11 6 12 7 13c.5.5 1 2 1 3 0 1.5-1 2-1 3 0 .5.5 1 1.5 1s2-1 3.5-1 2.5 1 3.5 1 1.5-.5 1.5-1c0-1-1-1.5-1-3 0-1 .5-2.5 1-3 1-1 1-2-.5-3.5C15 8 14 7 14 6c0-2-1-4-2-4z"/></svg>',
+    "router":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="14" width="20" height="7" rx="1"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/><line x1="10" y1="17.5" x2="10.01" y2="17.5"/><path d="M12 14V8M8 8a4 4 0 018 0"/></svg>',
+    "database":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 11v6c0 1.7 4 3 9 3s9-1.3 9-3v-6"/></svg>',
+    "office":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>',
+    "adobe":'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 3h5l4 8 4-8h5v18h-5v-8l-4 8-4-8v8H3z" opacity="0.9"/></svg>',
+    "pdf":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/></svg>',
+    "code":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>',
+    "java":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 18c-2 0-3-1-3-2 0-1 1-2 4-2v2c0 1 .5 2 1 2z"/><path d="M11 15c-4-1-5-3-5-5 0-2 3-3 6-3v2c-2 0-3 .5-3 1.5S10 12 13 13"/><path d="M14 12c4-1 5-3 5-5 0-2-3-3-6-3v2c2 0 3 .5 3 1.5S16 9 13 10"/></svg>',
+    "python":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2c-3 0-5 1-5 3v2h5v1H5c-2 0-3 2-3 4s1 4 3 4h2v-2c0-2 2-3 4-3h3c2 0 3-1 3-3V5c0-2-2-3-5-3z"/><circle cx="9" cy="4.5" r="0.5" fill="currentColor"/></svg>',
+    "terminal":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>',
+    "disk":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>',
+    "archive":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>',
+    "usb":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="4" r="2"/><path d="M12 6v6"/><path d="M9 12h6"/><path d="M12 12v8a2 2 0 002 2 2 2 0 002-2"/></svg>',
+    "trash":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>',
+    "wrench":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a4 4 0 00-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 005.4-5.4l-2.5 2.5-2.5-.5-.5-2.5 2.5-2.5z"/></svg>',
+    "network":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15 15 0 010 20M12 2a15 15 0 000 20"/></svg>',
+    "remote":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="18" x2="12" y2="21"/></svg>',
+    "browser":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15 15 0 010 20M12 2a15 15 0 000 20"/></svg>',
+    "media":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>',
+    "screenshot":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 01-2 2H3a2 2 0 01-2-2V8a2 2 0 012-2h4l2-3h6l2 3h4a2 2 0 012 2z"/><circle cx="12" cy="13" r="4"/></svg>',
+    "key":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.5 7.5a5 5 0 11-7 7 5 5 0 017-7zm0 0L21 2m-9.5 9.5l5 5"/></svg>',
+    "lock":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>',
+    "driver":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="10" x2="6" y2="10"/><line x1="6" y1="14" x2="6" y2="14"/><line x1="10" y1="10" x2="18" y2="10"/><line x1="10" y1="14" x2="18" y2="14"/></svg>',
+    "box":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8l-9-5-9 5v8l9 5 9-5V8z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg>',
+    "download":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+    "upload":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>',
+    "link":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 007 0l3-3a5 5 0 00-7-7l-1 1"/><path d="M14 11a5 5 0 00-7 0l-3 3a5 5 0 007 7l1-1"/></svg>',
+    "copy":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>',
+    "refresh":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>',
+    "folder":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>',
+    "file":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>',
+    "search":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+    "package":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="16.5" y1="5.5" x2="7.5" y2="14.5"/><polygon points="21 8 21 21 3 21 3 8 12 1 21 8"/><polyline points="3 8 12 13 21 8"/></svg>',
+    "edit":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>',
+    "plus":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
+    "back":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>',
+    "external":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>',
+    "chevron":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>',
+    "layers":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>',
+    "settings":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z"/></svg>',
+    "user":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+    "users":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>',
+    "logout":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>',
+    "save":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>',
+    "close":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+    "menu":'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>',
 }
 
-def load_json(path, default):
-    try:
-        with open(path,"r",encoding="utf-8") as f:return json.load(f)
-    except Exception:return default
+def get_svg(name):
+    return SVG_ICONS.get(name, SVG_ICONS["box"])
 
-def save_json(path,data):
-    os.makedirs(os.path.dirname(path),exist_ok=True);tmp=path+'.tmp'
-    with open(tmp,'w',encoding='utf-8') as f:json.dump(data,f,ensure_ascii=False,indent=2)
-    os.replace(tmp,path)
+# ============================================================
+# User authentication
+# ============================================================
 
-def default_config():return {"software":{}}
-def load_users():return load_json(USERS_FILE,{"users":[]})
-def has_users():return bool(load_users().get("users"))
-def hash_password(password,salt=None):
-    salt=salt or os.urandom(16).hex();return salt,hashlib.pbkdf2_hmac('sha256',password.encode(),bytes.fromhex(salt),180000).hex()
-def verify_password(password,user):
-    try:return hashlib.pbkdf2_hmac('sha256',password.encode(),bytes.fromhex(user['salt']),180000).hex()==user['password']
-    except Exception:return False
+def hash_password(password):
+    return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
-def format_size(size):
-    size=float(size)
-    for u in ('B','KB','MB','GB','TB'):
-        if size<1024:return f'{int(size)} {u}' if u=='B' else f'{size:.1f} {u}'
-        size/=1024
-    return f'{size:.1f} PB'
+def load_users():
+    data = load_json(USERS_FILE, None)
+    if data is None:
+        return {"users": []}
+    return data
 
-def get_file_type(filename):
-    low=filename.lower()
-    for ext,t in sorted(SUPPORTED_EXTENSIONS.items(),key=lambda x:-len(x[0])):
-        if low.endswith(ext):return t
-    return 'FILE'
+def save_users(users_data):
+    save_json(USERS_FILE, users_data)
 
-def sanitize_filename(name):
-    name=os.path.basename(urllib.parse.unquote(str(name or ''))).strip()
-    name=re.sub(r'[\\/:*?"<>|\x00-\x1f]','_',name)
-    return name or 'download.bin'
+def has_users():
+    users = load_users()
+    return len(users.get("users", [])) > 0
 
-def identify_file(filename):
-    low=filename.lower().replace('_',' ').replace('-',' ')
-    for key,cfg in SOFTWARE_DB.items():
-        if key in low:return key,cfg
-    stem=os.path.splitext(filename)[0]
-    return stem.lower(),{"name":stem,"category":"其他","icon":"box","desc":"","official":""}
+def find_user(username):
+    users = load_users()
+    for u in users.get("users", []):
+        if u.get("username") == username:
+            return u
+    return None
 
-def build_entry_list():
-    result=[]
-    if not os.path.isdir(ROOT_DIR):return result
-    for root,dirs,files in os.walk(ROOT_DIR):
-        dirs[:]=[d for d in dirs if d not in SKIP_DIRS]
-        for fn in files:
-            if fn in SKIP_FILES or fn.startswith('.') :continue
-            path=os.path.join(root,fn)
-            try:
-                st=os.stat(path)
-                rel=os.path.relpath(path,ROOT_DIR).replace('\\','/')
-                result.append({"filename":fn,"path":rel,"size":st.st_size,"sizeText":format_size(st.st_size),"fileType":get_file_type(fn),"date":datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M')})
-            except OSError:continue
-    result.sort(key=lambda x:x['filename'].lower())
-    return result
+def create_user(username, password, role="user"):
+    users = load_users()
+    if any(u.get("username") == username for u in users.get("users", [])):
+        return False, "用户名已存在"
+    users["users"].append({
+        "username": username,
+        "password": hash_password(password),
+        "role": role,
+        "created": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    })
+    save_users(users)
+    return True, "创建成功"
 
-def build_software_list():
-    entries=build_entry_list();cfg=load_json(CONFIG_FILE,default_config());overrides=cfg.get('software',{}) or {};grouped={}
-    for item in entries:
-        key,base=identify_file(item['filename']);x=overrides.get(key,{})
-        if key not in grouped:
-            grouped[key]={"name":x.get("displayName") or base["name"],"category":x.get("category") or base["category"],"icon":x.get("icon") or base["icon"],"desc":x.get("desc") or base["desc"],"official":x.get("official") or x.get("customOfficial") or base.get("official",""),"showOfficial":x.get("showOfficial",bool(x.get("official") or base.get("official"))),"versions":[]}
-        vc=(x.get('versions',{}) or {}).get(item['path'],{})
-        v=dict(item);v['displayName']=item['filename'];v['downloadUrl']=vc.get('downloadUrl','') if isinstance(vc,dict) else ''
-        grouped[key]['versions'].append(v)
-    for key,x in overrides.items():
-        if key not in grouped and isinstance(x,dict):
-            grouped[key]={"name":x.get("displayName") or key,"category":x.get("category","其他"),"icon":x.get("icon","box"),"desc":x.get("desc",""),"official":x.get("official") or x.get("customOfficial",""),"showOfficial":x.get("showOfficial",True),"versions":[]}
-    out=list(grouped.values());out.sort(key=lambda x:x['name'].lower())
-    for x in out:x['versions'].sort(key=lambda v:v['filename'].lower(),reverse=True)
-    return out
+def verify_user(username, password):
+    u = find_user(username)
+    if not u:
+        return False, "用户不存在"
+    if u.get("password") != hash_password(password):
+        return False, "密码错误"
+    return True, u
 
-def esc(v):return htmlmod.escape(str(v or ''),quote=True)
-def js(v):return json.dumps(v,ensure_ascii=False).replace('</','<\\/')
+def delete_user(username):
+    users = load_users()
+    before = len(users.get("users", []))
+    users["users"] = [u for u in users.get("users", []) if u.get("username") != username]
+    if len(users["users"]) < before:
+        save_users(users)
+        return True, "已删除"
+    return False, "用户不存在"
 
-def generate_html():
-    data=build_software_list();total=sum(len(x['versions']) for x in data);cats=sorted({x['category'] for x in data});icons=dict(SVG_ICONS)
-    data_json=json.dumps(data,ensure_ascii=False);cats_json=json.dumps(cats,ensure_ascii=False);icons_json=json.dumps(icons,ensure_ascii=False)
-    return '''<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>软件库 | Software Library</title><style>
-:root{--bg:#f5f6f8;--card:#fff;--text:#1a1d28;--muted:#6b7280;--accent:#4f7cff;--line:#e0e3eb;--green:#16a34a;--red:#dc2626;--orange:#d97706;--shadow:0 3px 16px rgba(0,0,0,.06)}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif}.header{position:sticky;top:0;z-index:20;background:#fffffff2;backdrop-filter:blur(16px);border-bottom:1px solid var(--line)}.header-inner{max-width:1450px;margin:auto;padding:10px 16px;display:flex;gap:12px;align-items:center}.logo{font-weight:800;white-space:nowrap}.logo small{display:block;color:var(--muted);font-size:9px;font-weight:500}.search{flex:1;max-width:680px;margin:auto;position:relative}.search input{width:100%;height:38px;border:1px solid var(--line);border-radius:9px;background:#f2f4f7;padding:0 13px;outline:0}.search input:focus{background:#fff;border-color:var(--accent)}button,input,select{font:inherit}.btn{border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 10px;font-size:12px;cursor:pointer}.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn.danger{color:var(--red)}.actions{display:flex;gap:7px;align-items:center}.user{font-size:11px;color:var(--muted)}main{max-width:1450px;margin:auto;padding:22px 16px 45px}.hero{display:flex;justify-content:space-between;align-items:end}.hero h1{font-size:23px;margin:0}.hero p{font-size:11px;color:var(--muted);margin:3px 0}.filter{display:flex;gap:8px;margin:18px 0}.filter select{border:1px solid var(--line);border-radius:8px;background:#fff;padding:8px 12px;min-width:210px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:11px}.card{background:#fff;border:1px solid var(--line);border-radius:13px;padding:13px;box-shadow:var(--shadow)}.card-head{display:flex;gap:10px}.icon{width:38px;height:38px;flex:none;border-radius:9px;background:#eef3ff;color:var(--accent);display:flex;align-items:center;justify-content:center}.icon svg{width:21px;height:21px}.card h2{font-size:14px;margin:0;word-break:break-word}.desc{font-size:10px;color:var(--muted);margin-top:3px}.tag{display:inline-block;margin-top:5px;padding:2px 7px;border-radius:5px;background:#eef3ff;color:var(--accent);font-size:9px}.official{margin-top:8px}.official a{font-size:10px;color:var(--accent);text-decoration:none}.file{margin-top:10px;padding-top:9px;border-top:1px solid #f0f1f3}.filename{font-size:11px;word-break:break-all}.meta{font-size:9px;color:var(--muted);margin:3px 0 6px}.links{display:flex;gap:5px;flex-wrap:wrap}.links a{font-size:10px;text-decoration:none;border:1px solid var(--line);border-radius:6px;padding:4px 7px;color:var(--text)}.links a.blue{color:var(--accent)}.empty{text-align:center;color:var(--muted);padding:70px}.modal-mask{display:none;position:fixed;inset:0;background:rgba(15,23,42,.48);z-index:100;align-items:center;justify-content:center;padding:15px}.modal{background:#fff;border-radius:14px;width:min(900px,100%);max-height:90vh;overflow:auto;padding:18px}.modal h2{margin:0 0 14px;font-size:17px}.form{display:grid;grid-template-columns:1fr 1fr;gap:9px}.form .full{grid-column:1/-1}.form label{font-size:10px;color:var(--muted)}.form input,.form select{width:100%;margin-top:4px;padding:8px;border:1px solid var(--line);border-radius:7px;outline:0}.admin-sw{padding:12px 0;border-bottom:1px solid var(--line)}.admin-sw:last-child{border:0}.admin-file{display:grid;grid-template-columns:1fr minmax(260px,2fr) auto auto;gap:6px;align-items:center;margin-top:7px}.small{font-size:10px;color:var(--muted);word-break:break-all}.users{margin-bottom:15px}.userrow{display:flex;gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid #f0f1f3;font-size:11px}.userrow b{flex:1}.role{font-size:9px;color:var(--accent)}.toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:9px 14px;border-radius:8px;font-size:11px;display:none;z-index:200}@media(max-width:700px){.header-inner{flex-wrap:wrap}.search{order:3;flex-basis:100%}.user{display:none}.grid{grid-template-columns:1fr}.admin-file{grid-template-columns:1fr}.form{grid-template-columns:1fr}.form .full{grid-column:auto}.modal{padding:13px}}
-</style></head><body><header class="header"><div class="header-inner"><div class="logo">📦 软件库<small>Software Library</small></div><div class="search"><input id="q" placeholder="搜索软件、文件名…" oninput="render()"></div><div class="actions"><span id="who" class="user"></span><button id="loginBtn" class="btn primary" onclick="openLogin()">登录</button><button id="uploadBtn" class="btn" style="display:none" onclick="openUpload()">上传</button><button id="adminBtn" class="btn" style="display:none" onclick="openAdmin()">管理后台</button></div></div></header><main><div class="hero"><div><h1>软件库</h1><p id="stats"></p></div></div><div class="filter"><select id="cat" onchange="render()"><option value="">全部分类</option></select></div><div id="list" class="grid"></div></main><div id="mask" class="modal-mask"><div id="modal" class="modal"></div></div><div id="toast" class="toast"></div><script>const DATA='''+data_json+''';const ICONS='''+icons_json+''';let SESSION=null;const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));const api=async(u,o={})=>{let r=await fetch(u,o);return r.json()};const post=(u,d)=>api(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});function toast(s){let e=document.getElementById('toast');e.textContent=s;e.style.display='block';setTimeout(()=>e.style.display='none',2400)}function openM(x){document.getElementById('modal').innerHTML=x;document.getElementById('mask').style.display='flex'}function closeM(){document.getElementById('mask').style.display='none'}function render(){let q=document.getElementById('q').value.toLowerCase(),c=document.getElementById('cat').value;let a=DATA.filter(x=>(!c||x.category===c)&&(!q||(x.name+' '+x.desc+' '+x.versions.map(v=>v.filename).join(' ')).toLowerCase().includes(q)));document.getElementById('stats').textContent=`${a.length} 个软件 · ${a.reduce((n,x)=>n+x.versions.length,0)} 个文件`;document.getElementById('list').innerHTML=a.length?a.map(x=>`<article class="card"><div class="card-head"><div class="icon">${ICONS[x.icon]||ICONS.box}</div><div><h2>${esc(x.name)}</h2><span class="tag">${esc(x.category)}</span><div class="desc">${esc(x.desc)}</div></div></div>${x.official&&x.showOfficial?`<div class="official"><a target="_blank" href="${esc(x.official)}">访问官网 ↗</a></div>`:''}${x.versions.map(v=>`<div class="file"><div class="filename">${esc(v.filename)}</div><div class="meta">${esc(v.fileType)} · ${esc(v.sizeText)} · ${esc(v.date)}</div><div class="links"><a href="/download/${encodeURIComponent(v.path).replaceAll('%2F','/')}">下载</a>${v.downloadUrl?`<a class="blue" target="_blank" href="${esc(v.downloadUrl)}">官方直链</a>`:''}</div></div>`).join('')}</article>`).join(''):'<div class="empty">没有找到匹配的文件</div>'}function openLogin(){openM(`<h2>${HAS_USERS?'登录':'首次使用：创建管理员'}</h2><div class="form"><label>用户名<input id="un" autocomplete="username"></label><label>密码<input id="pw" type="password" autocomplete="current-password"></label></div><div style="margin-top:14px;display:flex;justify-content:flex-end;gap:7px"><button class="btn" onclick="closeM()">取消</button><button class="btn primary" onclick="login()">${HAS_USERS?'登录':'创建管理员'}</button></div>`)}async function login(){let r=await post('/api/login',{username:document.getElementById('un').value,password:document.getElementById('pw').value});if(r.success){closeM();location.reload()}else toast(r.error||'操作失败')}async function logout(){await post('/api/logout',{});location.reload()}function openUpload(){openM(`<h2>上传文件</h2><input id="file" type="file"><div style="margin-top:14px;display:flex;justify-content:flex-end;gap:7px"><button class="btn" onclick="closeM()">取消</button><button class="btn primary" onclick="upload()">开始上传</button></div>`)}async function upload(){let f=document.getElementById('file').files[0];if(!f)return toast('请选择文件');if(f.size>''' + str(MAX_UPLOAD_SIZE) + ''')return toast('文件超过500MB限制');let fd=new FormData();fd.append('file',f);let r=await fetch('/api/upload',{method:'POST',body:fd});let d=await r.json();toast(d.success?'上传成功':d.error);if(d.success)setTimeout(()=>location.reload(),800)}async function openAdmin(){let r=await api('/api/admin/data');if(!r.success)return toast(r.error);let users=r.users;openM(`<h2>管理后台</h2><h3>添加账户</h3><div class="form"><label>用户名<input id="nu"></label><label>密码<input id="np" type="password"></label><label>角色<select id="nr"><option value="user">普通用户</option><option value="admin">管理员</option></select></label></div><div style="margin:8px 0"><button class="btn primary" onclick="addUser()">添加账户</button></div><div class="users"><h3>账户</h3>${users.map(u=>`<div class="userrow"><b>${esc(u.username)}</b><span class="role">${esc(u.role)}</span>${!(u.role==='admin'&&users.filter(x=>x.role==='admin').length<=1)?`<button class="btn danger" onclick="delUser(${JSON.stringify(u.username)})">删除</button>`:''}</div>`).join('')}</div><h3>软件及文件配置</h3>${r.software.map(x=>`<div class="admin-sw"><b>${esc(x.name)}</b><div class="small">官网地址</div><input id="off-${CSS.escape(x.key||x.name)}" value="${esc(x.official)}" style="width:100%;margin-top:4px;padding:7px;border:1px solid #e0e3eb;border-radius:7px"><button class="btn" style="margin-top:5px" onclick="saveOfficial(${JSON.stringify(x.key||x.name)})">保存官网</button>${x.versions.map(v=>`<div class="admin-file"><span class="small">${esc(v.filename)}</span><input id="url-${btoa(unescape(encodeURIComponent(x.name+'|'+v.path))).replace(/=/g,'')}" value="${esc(v.downloadUrl)}" placeholder="该文件官方下载地址"><button class="btn" onclick="saveUrl(${JSON.stringify(x.key||x.name)},${JSON.stringify(v.path)})">保存</button><button class="btn" onclick="fetchFile(${JSON.stringify(x.key||x.name)},${JSON.stringify(v.path)})">下载留存</button></div>`).join('')}</div>`).join('')}<div style="margin-top:15px;text-align:right"><button class="btn" onclick="closeM()">关闭</button></div>`)}function keyid(k,p){return 'url-'+btoa(unescape(encodeURIComponent(k+'|'+p))).replace(/=/g,'')}async function addUser(){let r=await post('/api/admin/user',{username:document.getElementById('nu').value,password:document.getElementById('np').value,role:document.getElementById('nr').value});toast(r.success?'账户已添加':r.error);if(r.success)openAdmin()}async function delUser(u){let r=await post('/api/admin/user/delete',{username:u});toast(r.success?'账户已删除':r.error);if(r.success)openAdmin()}async function saveOfficial(k){let e=document.getElementById('off-'+CSS.escape(k)),r=await post('/api/admin/software',{name:k,official:e.value});toast(r.success?'官网地址已保存':r.error)}async function saveUrl(k,p){let e=document.getElementById(keyid(k,p)),r=await post('/api/admin/software',{name:k,versionPath:p,downloadUrl:e.value});toast(r.success?'官方下载地址已保存':r.error)}async function fetchFile(k,p){let e=document.getElementById(keyid(k,p));if(!e.value)return toast('请先填写官方下载地址');let r=await post('/api/admin/fetch',{name:k,path:p,url:e.value});toast(r.success?'已开始下载留存':r.error)}async function init(){let r=await api('/api/session');if(r.success)SESSION={username:r.username,role:r.role};let cats='''+cats_json+''';document.getElementById('cat').innerHTML='<option value="">全部分类</option>'+cats.map(x=>`<option>${esc(x)}</option>`).join('');document.getElementById('loginBtn').textContent=SESSION?'退出':'登录';document.getElementById('loginBtn').onclick=SESSION?logout:openLogin;if(SESSION){document.getElementById('who').textContent=SESSION.username;document.getElementById('uploadBtn').style.display='block';if(SESSION.role==='admin')document.getElementById('adminBtn').style.display='block'}else if(!HAS_USERS){openLogin()}render()}const HAS_USERS=''' + ('true' if has_users() else 'false') + ''';init();</script></body></html>'''
-    return cssfix_html()
+def get_session_token():
+    return uuid.uuid4().hex
 
-def cssfix_html():
-    # generate_html is already a complete document; retained as a named hook for compatibility.
-    return _generated_html
+# Simple in-memory session store: token -> {username, role}
+_sessions = {}
 
-# The frontend above is produced by generate_html; this assignment keeps the source compact
-# while avoiding any external template dependency.
-_generated_html = None
+def create_session(username, role):
+    token = get_session_token()
+    _sessions[token] = {"username": username, "role": role, "time": time.time()}
+    return token
 
-def regenerate_html():
-    global _generated_html
-    # generate_html returns a complete page except for the compatibility hook.
-    # Build it with a temporary direct implementation below.
-    data=build_software_list();total=sum(len(x['versions']) for x in data);cats=sorted({x['category'] for x in data});icons=json.dumps(SVG_ICONS,ensure_ascii=False);dj=json.dumps(data,ensure_ascii=False);cj=json.dumps(cats,ensure_ascii=False)
-    cards=''.join(f'<article class="card"><div class="card-head"><div class="icon">{SVG_ICONS.get(x["icon"],SVG_ICONS["box"])}</div><div><h2>{esc(x["name"])}</h2><span class="tag">{esc(x["category"])}</span><div class="desc">{esc(x["desc"])}</div></div></div>'+ (f'<div class="official"><a target="_blank" href="{esc(x["official"])}">访问官网 ↗</a></div>' if x.get('official') and x.get('showOfficial') else '') + ''.join(f'<div class="file"><div class="filename">{esc(v["filename"])}</div><div class="meta">{esc(v["fileType"])} · {esc(v["sizeText"])} · {esc(v["date"])}</div><div class="links"><a href="/download/{urllib.parse.quote(v["path"],safe="/")}">下载</a>'+ (f'<a class="blue" target="_blank" href="{esc(v["downloadUrl"])}">官方直链</a>' if v.get('downloadUrl') else '') +'</div></div>' for v in x['versions'])+'</article>' for x in data)
-    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>软件库 | Software Library</title><style>{PAGE_CSS}</style></head><body><header class="header"><div class="header-inner"><div class="logo">📦 软件库<small>Software Library v8</small></div><div class="search"><input id="q" placeholder="搜索软件、文件名…" oninput="render()"></div><div class="actions"><span id="who" class="user"></span><button id="loginBtn" class="btn primary">登录</button><button id="uploadBtn" class="btn" style="display:none">上传</button><button id="adminBtn" class="btn" style="display:none">管理后台</button></div></div></header><main><div class="hero"><div><h1>软件库</h1><p id="stats">{len(data)} 个软件 · {total} 个文件</p></div></div><div class="filter"><select id="cat"><option value="">全部分类</option></select></div><div id="list" class="grid">{cards or '<div class="empty">没有找到文件</div>'}</div></main><div id="mask" class="modal-mask"><div id="modal" class="modal"></div></div><div id="toast" class="toast"></div><script>const DATA={dj};const ICONS={icons};const HAS_USERS={'true' if has_users() else 'false'};let SESSION=null;const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[m]));const api=async(u,o={{}})=>(await fetch(u,o)).json();const post=(u,d)=>api(u,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(d)}});function toast(s){{let e=document.getElementById('toast');e.textContent=s;e.style.display='block';setTimeout(()=>e.style.display='none',2200)}}function openM(x){{document.getElementById('modal').innerHTML=x;document.getElementById('mask').style.display='flex'}}function closeM(){{document.getElementById('mask').style.display='none'}}function render(){{let q=document.getElementById('q').value.toLowerCase(),c=document.getElementById('cat').value;let a=DATA.filter(x=>(!c||x.category===c)&&(!q||(x.name+' '+x.desc+' '+x.versions.map(v=>v.filename).join(' ')).toLowerCase().includes(q)));document.getElementById('stats').textContent=`${{a.length}} 个软件 · ${{a.reduce((n,x)=>n+x.versions.length,0)}} 个文件`;document.getElementById('list').innerHTML=a.map(x=>`<article class="card"><div class="card-head"><div class="icon">${{ICONS[x.icon]||ICONS.box}}</div><div><h2>${{esc(x.name)}}</h2><span class="tag">${{esc(x.category)}}</span><div class="desc">${{esc(x.desc)}}</div></div></div>${{x.official&&x.showOfficial?`<div class="official"><a target="_blank" href="${{esc(x.official)}}">访问官网 ↗</a></div>`:''}}${{x.versions.map(v=>`<div class="file"><div class="filename">${{esc(v.filename)}}</div><div class="meta">${{esc(v.fileType)}} · ${{esc(v.sizeText)}} · ${{esc(v.date)}}</div><div class="links"><a href="/download/${{encodeURIComponent(v.path).replaceAll('%2F','/')}}">下载</a>${{v.downloadUrl?`<a class="blue" target="_blank" href="${{esc(v.downloadUrl)}}">官方直链</a>`:''}}</div></div>`).join('')}}</article>`).join('')||'<div class="empty">没有找到文件</div>'}}function openLogin(){{openM(`<h2>${{HAS_USERS?'登录':'首次使用：创建管理员'}}</h2><div class="form"><label>用户名<input id="un"></label><label>密码<input id="pw" type="password"></label></div><div class="modal-actions"><button class="btn" onclick="closeM()">取消</button><button class="btn primary" onclick="login()">${{HAS_USERS?'登录':'创建管理员'}}</button></div>`)}}async function login(){{let r=await post('/api/login',{{username:document.getElementById('un').value,password:document.getElementById('pw').value}});if(r.success)location.reload();else toast(r.error)}}async function logout(){{await post('/api/logout',{{}});location.reload()}}function openUpload(){{openM(`<h2>上传文件</h2><input id="file" type="file"><div class="modal-actions"><button class="btn" onclick="closeM()">取消</button><button class="btn primary" onclick="upload()">上传</button></div>`)}}async function upload(){{let f=document.getElementById('file').files[0];if(!f)return toast('请选择文件');if(f.size>{MAX_UPLOAD_SIZE})return toast('文件超过500MB限制');let fd=new FormData();fd.append('file',f);let r=await fetch('/api/upload',{{method:'POST',body:fd}});let d=await r.json();toast(d.success?'上传成功':d.error);if(d.success)setTimeout(()=>location.reload(),700)}}function openAdmin(){{api('/api/admin/data').then(r=>{{if(!r.success)return toast(r.error);openM('<h2>管理后台</h2><div class="admin-note">用户管理和软件/文件直链管理请在此处完成。'+r.users.length+' 个账户，'+r.software.length+' 个软件。</div><div class="modal-actions"><button class="btn" onclick="closeM()">关闭</button></div>')}})}}async function init(){{let r=await api('/api/session');if(r.success)SESSION={{username:r.username,role:r.role}};document.getElementById('loginBtn').textContent=SESSION?'退出':'登录';document.getElementById('loginBtn').onclick=SESSION?logout:openLogin;if(SESSION){{document.getElementById('who').textContent=SESSION.username;document.getElementById('uploadBtn').style.display='block';document.getElementById('uploadBtn').onclick=openUpload;if(SESSION.role==='admin'){{document.getElementById('adminBtn').style.display='block';document.getElementById('adminBtn').onclick=openAdmin}}}}document.getElementById('cat').innerHTML='<option value="">全部分类</option>'+{cj}.map(x=>`<option>${{esc(x)}}</option>`).join('');render();if(!SESSION&&!HAS_USERS)openLogin()}}init();</script></body></html>'''
-
-PAGE_CSS='''.header{position:sticky;top:0;z-index:20;background:#fffffff2;backdrop-filter:blur(16px);border-bottom:1px solid #e0e3eb}.header-inner{max-width:1450px;margin:auto;padding:10px 16px;display:flex;gap:12px;align-items:center}.logo{font-weight:800;white-space:nowrap}.logo small{display:block;color:#6b7280;font-size:9px;font-weight:500}.search{flex:1;max-width:680px;margin:auto}.search input{width:100%;height:38px;border:1px solid #e0e3eb;border-radius:9px;background:#f2f4f7;padding:0 13px;outline:0}.actions{display:flex;gap:7px;align-items:center}.btn{border:1px solid #e0e3eb;background:#fff;border-radius:8px;padding:7px 10px;font-size:12px;cursor:pointer}.btn.primary{background:#4f7cff;border-color:#4f7cff;color:#fff}.user{font-size:11px;color:#6b7280}main{max-width:1450px;margin:auto;padding:22px 16px 45px}.hero h1{font-size:23px;margin:0}.hero p{font-size:11px;color:#6b7280;margin:3px 0}.filter{display:flex;gap:8px;margin:18px 0}.filter select{border:1px solid #e0e3eb;border-radius:8px;background:#fff;padding:8px 12px;min-width:210px}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(285px,1fr));gap:11px}.card{background:#fff;border:1px solid #e0e3eb;border-radius:13px;padding:13px;box-shadow:0 3px 16px rgba(0,0,0,.06)}.card-head{display:flex;gap:10px}.icon{width:38px;height:38px;flex:none;border-radius:9px;background:#eef3ff;color:#4f7cff;display:flex;align-items:center;justify-content:center}.icon svg{width:21px;height:21px}.card h2{font-size:14px;margin:0;word-break:break-word}.tag{display:inline-block;margin-top:5px;padding:2px 7px;border-radius:5px;background:#eef3ff;color:#4f7cff;font-size:9px}.desc{font-size:10px;color:#6b7280;margin-top:3px}.official{margin-top:8px}.official a{font-size:10px;color:#4f7cff;text-decoration:none}.file{margin-top:10px;padding-top:9px;border-top:1px solid #f0f1f3}.filename{font-size:11px;word-break:break-all}.meta{font-size:9px;color:#6b7280;margin:3px 0 6px}.links{display:flex;gap:5px;flex-wrap:wrap}.links a{font-size:10px;text-decoration:none;border:1px solid #e0e3eb;border-radius:6px;padding:4px 7px;color:#1a1d28}.links a.blue{color:#4f7cff}.empty{text-align:center;color:#6b7280;padding:70px}.modal-mask{display:none;position:fixed;inset:0;background:rgba(15,23,42,.48);z-index:100;align-items:center;justify-content:center;padding:15px}.modal{background:#fff;border-radius:14px;width:min(900px,100%);max-height:90vh;overflow:auto;padding:18px}.modal h2{margin:0 0 14px;font-size:17px}.form{display:grid;grid-template-columns:1fr 1fr;gap:9px}.form label{font-size:10px;color:#6b7280}.form input{width:100%;margin-top:4px;padding:8px;border:1px solid #e0e3eb;border-radius:7px}.modal-actions{display:flex;justify-content:flex-end;gap:7px;margin-top:14px}.admin-note{font-size:12px;color:#6b7280}@media(max-width:700px){.header-inner{flex-wrap:wrap}.search{order:3;flex-basis:100%}.user{display:none}.grid{grid-template-columns:1fr}.form{grid-template-columns:1fr}}
-'''
-
-# Replace the placeholder-compatible generate_html with the final renderer.
-generate_html = regenerate_html
-
-SESSIONS = {}
-
-def _get_session(handler):
-    token=handler.headers.get('X-Session','')
+def get_session(token):
     if not token:
-        m=re.search(r'(?:^|;\s*)session=([^;]+)',handler.headers.get('Cookie',''))
-        token=m.group(1) if m else ''
-    return SESSIONS.get(token)
+        return None
+    s = _sessions.get(token)
+    if not s:
+        return None
+    # Session expires after 7 days
+    if time.time() - s["time"] > 7 * 86400:
+        del _sessions[token]
+        return None
+    return s
 
-def _send_json(handler,obj,status=200,headers=None):
-    b=json.dumps(obj,ensure_ascii=False).encode();handler.send_response(status);handler.send_header('Content-Type','application/json; charset=utf-8');handler.send_header('Content-Length',str(len(b)))
-    for k,v in (headers or {}).items():handler.send_header(k,v)
-    handler.end_headers();handler.wfile.write(b)
+def destroy_session(token):
+    if token in _sessions:
+        del _sessions[token]
 
-def _body(handler):
-    n=int(handler.headers.get('Content-Length','0') or 0)
-    if n>2*1024*1024:raise ValueError('请求过大')
-    return json.loads(handler.rfile.read(n) or b'{}')
+# ============================================================
+# Software matching
+# ============================================================
 
-def _admin(handler):
-    u=_get_session(handler);return u if u and u.get('role')=='admin' else None
+def _key_match(key, text):
+    """Match on word boundaries so e.g. 'git' no longer matches 'Digital'."""
+    k = re.escape(key.lower())
+    return re.search(r"(?<![a-z0-9])" + k + r"(?![a-z0-9])", text)
 
-class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self,*args,**kwargs):super().__init__(*args,directory=DATA_DIR,**kwargs)
-    def log_message(self,format,*args):
-        try:
-            os.makedirs(LOG_DIR,exist_ok=True)
-            with open(os.path.join(LOG_DIR,'server.log'),'a',encoding='utf-8') as f:f.write(f'[{self.log_date_time_string()}] {format % args}\n')
-        except Exception:pass
-    def do_GET(self):
-        p=urllib.parse.urlparse(self.path).path
-        if p=='/':
-            b=generate_html().encode();self.send_response(200);self.send_header('Content-Type','text/html; charset=utf-8');self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b);return
-        if p=='/api/session':
-            u=_get_session(self);_send_json(self,{'success':bool(u),'username':u.get('username') if u else None,'role':u.get('role') if u else None});return
-        if p=='/api/software':_send_json(self,{'success':True,'data':build_software_list()});return
-        if p.startswith('/download/'):
-            rel=urllib.parse.unquote(p[len('/download/'):]).lstrip('/');root=os.path.realpath(ROOT_DIR);full=os.path.realpath(os.path.join(root,rel))
-            if not full.startswith(root+os.sep) or not os.path.isfile(full):self.send_error(404);return
-            st=os.stat(full);self.send_response(200);self.send_header('Content-Type','application/octet-stream');self.send_header('Content-Length',str(st.st_size));self.send_header('Content-Disposition',f'attachment; filename="{sanitize_filename(os.path.basename(full))}"');self.end_headers()
+def match_software(filename, dirpath):
+    lower = filename.lower()
+    parent_dir = os.path.basename(dirpath).lower()
+    search_str = lower + " " + parent_dir
+
+    # 始终使用文件名（不含扩展名）作为显示名称
+    display_name = os.path.splitext(filename)[0]
+
+    # 从数据库匹配分类、图标、描述（仅用于归类，不影响显示名）
+    category = "其他"
+    icon_name = "file"
+    desc = "软件文件"
+    official = ""
+
+    for key, info in SOFTWARE_DB.items():
+        if _key_match(key, search_str):
+            category = info["category"]
+            icon_name = info["icon"]
+            desc = info["desc"]
+            official = info.get("official", "")
+            break
+
+    # 特殊匹配：仍保留归类逻辑
+    if "vmware" in search_str and _key_match("tools", search_str):
+        category, icon_name, desc = "虚拟化", "vmware", "VMware Tools 驱动包"
+    elif _key_match("keygen", lower) or "注册机" in lower:
+        category, icon_name, desc = "激活工具", "key", "注册/激活工具"
+    elif _key_match("patch", lower) or "补丁" in lower or _key_match("crack", lower):
+        category, icon_name, desc = "激活工具", "key", "软件补丁"
+
+    # 未匹配到数据库时，按扩展名给图标
+    if category == "其他":
+        ext = os.path.splitext(filename)[1].lower()
+        ext_icons = {".exe":"box",".msi":"box",".iso":"disk",".img":"disk",".zip":"archive",
+                      ".7z":"archive",".rar":"archive",".gz":"archive",".apk":"box",
+                      ".dmg":"disk",".vmdk":"disk",".ova":"box",".ovf":"box",".wim":"disk"}
+        icon_name = ext_icons.get(ext, "file")
+
+    return display_name, category, icon_name, desc, official
+
+def format_size(size_bytes):
+    if size_bytes == 0: return "0 B"
+    size = float(size_bytes)
+    for unit in ["B","KB","MB","GB","TB"]:
+        if size < 1024:
+            if unit == "B": return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} PB"
+
+def get_file_date(filepath):
+    try:
+        mtime = os.path.getmtime(filepath)
+        return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+# ============================================================
+# Scanner
+# ============================================================
+
+def _scan_tree(base_dir, items, seen_paths, url_prefix=""):
+    exts = set(SUPPORTED_EXTENSIONS.keys())
+    compound_exts = [".tar.gz", ".tar.xz"]
+    for dirpath, dirnames, filenames in os.walk(base_dir):
+        dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")]
+        for filename in filenames:
+            if filename.lower() in SKIP_FILES:
+                continue
+            fullpath = os.path.join(dirpath, filename)
+            lower = filename.lower()
+            matched_ext = None
+            for ce in compound_exts:
+                if lower.endswith(ce):
+                    matched_ext = ce
+                    break
+            if not matched_ext:
+                _, ext = os.path.splitext(filename)
+                ext = ext.lower()
+                if ext in exts:
+                    matched_ext = ext
+            if not matched_ext:
+                continue
             try:
-                with open(full,'rb') as f:
-                    while True:
-                        b=f.read(1024*1024)
-                        if not b:break
-                        self.wfile.write(b)
-            except BrokenPipeError:pass
-            return
-        self.send_error(404)
-    def do_POST(self):
-        p=urllib.parse.urlparse(self.path).path
-        try:d=_body(self)
-        except Exception as e:return _send_json(self,{'success':False,'error':str(e)},400)
-        if p=='/api/login':
-            us=load_users();name=str(d.get('username','')).strip();pw=str(d.get('password',''))
-            if not us.get('users'):
-                if len(name)<2 or len(pw)<6:return _send_json(self,{'success':False,'error':'首次注册：用户名至少2位，密码至少6位'},400)
-                salt,h=hash_password(pw);u={'username':name,'password':h,'salt':salt,'role':'admin'};save_json(USERS_FILE,{'users':[u]})
-            else:
-                u=next((x for x in us['users'] if x.get('username')==name),None)
-                if not u or not verify_password(pw,u):return _send_json(self,{'success':False,'error':'用户名或密码错误'},401)
-            sid=secrets.token_hex(32);SESSIONS[sid]=u.copy();return _send_json(self,{'success':True,'username':u['username'],'role':u['role']},headers={'Set-Cookie':f'session={sid}; HttpOnly; SameSite=Lax; Path=/'})
-        if p=='/api/logout':
-            m=re.search(r'(?:^|;\s*)session=([^;]+)',self.headers.get('Cookie',''));sid=m.group(1) if m else '';SESSIONS.pop(sid,None);return _send_json(self,{'success':True},headers={'Set-Cookie':'session=; Max-Age=0; Path=/'})
-        if p=='/api/admin/data':
-            if not _admin(self):return _send_json(self,{'success':False,'error':'需要管理员权限'},403)
-            data=build_software_list();
-            for x in data:x['key']=next((k for k,v in (load_json(CONFIG_FILE,default_config()).get('software',{}) or {}).items() if (v.get('displayName') if isinstance(v,dict) else None)==x['name']),x['name'])
-            return _send_json(self,{'success':True,'users':load_users().get('users',[]),'software':data})
-        if p=='/api/admin/user':
-            if not _admin(self):return _send_json(self,{'success':False,'error':'需要管理员权限'},403)
-            name=str(d.get('username','')).strip();pw=str(d.get('password',''));role='admin' if d.get('role')=='admin' else 'user';us=load_users()
-            if len(name)<2 or len(pw)<6:return _send_json(self,{'success':False,'error':'用户名至少2位，密码至少6位'})
-            if any(x.get('username')==name for x in us.get('users',[])):return _send_json(self,{'success':False,'error':'用户已存在'})
-            salt,h=hash_password(pw);us.setdefault('users',[]).append({'username':name,'password':h,'salt':salt,'role':role});save_json(USERS_FILE,us);return _send_json(self,{'success':True})
-        if p=='/api/admin/user/delete':
-            if not _admin(self):return _send_json(self,{'success':False,'error':'需要管理员权限'},403)
-            name=str(d.get('username',''));us=load_users();target=next((x for x in us.get('users',[]) if x.get('username')==name),None)
-            if not target:return _send_json(self,{'success':False,'error':'用户不存在'})
-            if target.get('role')=='admin' and sum(x.get('role')=='admin' for x in us['users'])<=1:return _send_json(self,{'success':False,'error':'不能删除最后一个管理员'})
-            us['users']=[x for x in us['users'] if x.get('username')!=name];save_json(USERS_FILE,us);return _send_json(self,{'success':True})
-        if p=='/api/admin/software':
-            if not _admin(self):return _send_json(self,{'success':False,'error':'需要管理员权限'},403)
-            name=str(d.get('name','')).strip();cfg=load_json(CONFIG_FILE,default_config());sw=cfg.setdefault('software',{});item=sw.setdefault(name,{})
-            if d.get('versionPath'):
-                url=str(d.get('downloadUrl','')).strip()
-                if url and not re.match(r'^https?://',url,re.I):return _send_json(self,{'success':False,'error':'下载地址必须以 http:// 或 https:// 开头'})
-                item.setdefault('versions',{})[str(d['versionPath'])]={'downloadUrl':url}
-            else:
-                for k in ('official','customOfficial','desc','category','icon','displayName'):
-                    if k in d:item[k]=sanitize_filename(d[k]) if k=='displayName' else d[k]
-            save_json(CONFIG_FILE,cfg);return _send_json(self,{'success':True})
-        if p=='/api/rescan':
-            if not _admin(self):return _send_json(self,{'success':False,'error':'需要管理员权限'},403)
-            e=run_scan();return _send_json(self,{'success':True,'totalFiles':len(e)})
-        if p=='/api/admin/fetch':
-            if not _admin(self):return _send_json(self,{'success':False,'error':'需要管理员权限'},403)
-            url=str(d.get('url','')).strip();name=str(d.get('name','')).strip()
-            if not re.match(r'^https?://',url,re.I):return _send_json(self,{'success':False,'error':'仅支持 HTTP/HTTPS 地址'})
-            threading.Thread(target=fetch_remote_file,args=(url,name),daemon=True).start();return _send_json(self,{'success':True,'message':'下载已开始'})
-        return _send_json(self,{'success':False,'error':'Not Found'},404)
-    def do_POST_multipart(self):pass
-    def do_OPTIONS(self):self.send_response(204);self.end_headers()
+                size = os.path.getsize(fullpath)
+            except Exception:
+                size = 0
+            relpath = os.path.relpath(fullpath, base_dir).replace("\\", "/")
+            webpath = url_prefix + relpath if url_prefix else relpath
+            if webpath in seen_paths:
+                continue
+            seen_paths.add(webpath)
+            name, category, icon, desc, official = match_software(filename, dirpath)
+            items.append({
+                "name": name, "filename": filename, "category": category,
+                "icon": icon, "desc": desc, "official": official,
+                "size": size, "sizeText": format_size(size),
+                "ext": matched_ext, "fileType": SUPPORTED_EXTENSIONS.get(matched_ext, "FILE"),
+                "date": get_file_date(fullpath), "path": webpath,
+            })
+
+
+def scan_directory():
+    """Scan ROOT_DIR plus UPLOAD_DIR (uploads live outside the read-only share)."""
+    items = []
+    seen_paths = set()
+    _scan_tree(ROOT_DIR, items, seen_paths)
+    if os.path.isdir(UPLOAD_DIR):
+        try:
+            real_upload = os.path.realpath(UPLOAD_DIR)
+            real_root = os.path.realpath(ROOT_DIR)
+            if not real_upload.startswith(real_root + os.sep) and real_upload != real_root:
+                _scan_tree(UPLOAD_DIR, items, seen_paths, UPLOAD_URL_PREFIX)
+        except Exception:
+            pass
+    items.sort(key=lambda x: (x["category"], x["name"].lower(), x["filename"].lower()))
+    return items
+
+# ============================================================
+# Data layer
+# ============================================================
+
+def load_json(filepath, default):
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+def save_json(filepath, data):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def default_config():
+    return {"software": {}, "order": [], "version": 1}
 
 def run_scan():
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning: {ROOT_DIR} + {UPLOAD_DIR}")
+    items = scan_directory()
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Found {len(items)} files")
+    os.makedirs(DATA_DIR, exist_ok=True)
+    data = {
+        "scanDate": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "rootDir": ROOT_DIR,
+        "totalFiles": len(items),
+        "totalSize": sum(i["size"] for i in items),
+        "totalSizeText": format_size(sum(i["size"] for i in items)),
+        "items": items,
+    }
+    save_json(SCAN_FILE, data)
+    return items
+
+def build_software_list():
+    scan_data = load_json(SCAN_FILE, {"items": []})
+    config = load_json(CONFIG_FILE, default_config())
+    scan_items = scan_data.get("items", [])
+    overrides = config.get("software", {})
+
+    grouped = {}
+    for item in scan_items:
+        name = item["name"]
+        if name not in grouped:
+            grouped[name] = {
+                "name": name,
+                "category": item["category"],
+                "icon": item["icon"],
+                "desc": item["desc"],
+                "official": item["official"],
+                "versions": [],
+                "showOfficial": False,
+                "customOfficial": "",
+                "downloadUrl": "",
+            }
+        grouped[name]["versions"].append({
+            "filename": item["filename"],
+            "size": item["size"],
+            "sizeText": item["sizeText"],
+            "fileType": item["fileType"],
+            "date": item["date"],
+            "path": item["path"],
+            "displayName": item["filename"],  # 版本名直接显示完整文件名
+            "downloadUrl": "",  # 每个版本可单独设置下载地址
+        })
+
+    for sw_name, cfg in overrides.items():
+        if sw_name in grouped:
+            if "category" in cfg: grouped[sw_name]["category"] = cfg["category"]
+            if "icon" in cfg: grouped[sw_name]["icon"] = cfg["icon"]
+            if "desc" in cfg: grouped[sw_name]["desc"] = cfg["desc"]
+            if "official" in cfg: grouped[sw_name]["official"] = cfg["official"]
+            if "showOfficial" in cfg: grouped[sw_name]["showOfficial"] = cfg["showOfficial"]
+            if "customOfficial" in cfg: grouped[sw_name]["customOfficial"] = cfg["customOfficial"]
+            if "downloadUrl" in cfg: grouped[sw_name]["downloadUrl"] = cfg["downloadUrl"]
+        else:
+            grouped[sw_name] = {
+                "name": sw_name,
+                "category": cfg.get("category", "其他"),
+                "icon": cfg.get("icon", "box"),
+                "desc": cfg.get("desc", ""),
+                "official": cfg.get("official", ""),
+                "versions": [],
+                "showOfficial": cfg.get("showOfficial", False),
+                "customOfficial": cfg.get("customOfficial", ""),
+                "downloadUrl": cfg.get("downloadUrl", ""),
+            }
+
+    sw_list = list(grouped.values())
+    sw_list.sort(key=lambda s: s["name"].lower())
+    # Sort versions by filename
+    for sw in sw_list:
+        sw["versions"].sort(key=lambda v: v.get("filename",""), reverse=True)
+    return sw_list
+
+# ============================================================
+# Remote URL fetch (download-to-library, background thread)
+# ============================================================
+
+_fetch_lock = threading.Lock()
+_fetch_status = {"active": False, "message": ""}
+
+
+def _fetch_filename(resp, url, fallback):
+    name = ""
+    cd = resp.headers.get("Content-Disposition") or ""
+    m = re.search(r"filename\*\s*=\s*UTF-8''([^;]+)", cd, re.I) or \
+        re.search(r'filename\s*=\s*"?([^";]+)"?', cd, re.I)
+    if m:
+        try:
+            name = urllib.parse.unquote(m.group(1).strip().strip('"').strip("'"))
+        except Exception:
+            name = m.group(1).strip().strip('"').strip("'")
+    if not name:
+        name = os.path.basename(urllib.parse.urlparse(url).path)
+    name = os.path.basename(name.replace("\\", "/"))
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip()
+    return name or (fallback + ".download")
+
+
+def fetch_remote_file(url, fallback_name):
+    """Download a remote file into UPLOAD_DIR in the background, then refresh."""
+    global _fetch_status
+    with _fetch_lock:
+        _fetch_status = {"active": True, "message": "正在连接..."}
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; software-library/6.0)"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                total = int(resp.headers.get("Content-Length") or 0)
+                if total and total > MAX_DOWNLOAD_SIZE:
+                    raise Exception("远程文件超过 2GB 限制")
+                filename = _fetch_filename(resp, url, fallback_name)
+                os.makedirs(UPLOAD_DIR, exist_ok=True)
+                base, ext = os.path.splitext(filename)
+                save_path = os.path.join(UPLOAD_DIR, filename)
+                if os.path.exists(save_path):
+                    save_path = os.path.join(UPLOAD_DIR, f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}")
+                done = 0
+                with open(save_path, "wb") as f:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        done += len(chunk)
+                        if done > MAX_DOWNLOAD_SIZE:
+                            raise Exception("远程文件超过 2GB 限制")
+                        f.write(chunk)
+                        if total:
+                            _fetch_status["message"] = f"下载中 {done * 100 // total}% ({format_size(done)})"
+                        else:
+                            _fetch_status["message"] = f"下载中 ({format_size(done)})"
+            saved = os.path.basename(save_path)
+            _fetch_status["message"] = f"已下载 {saved}，正在更新软件库..."
+            refresh_library()
+            _fetch_status = {"active": False, "message": f"完成: {saved} 已入库"}
+        except Exception as e:
+            _fetch_status = {"active": False, "message": f"失败: {e}"}
+
+
+def refresh_library():
+    """Rescan + regenerate index.html (blocking; uses _scan_lock)."""
     global _last_scan_time
-    e=build_entry_list();save_json(SCAN_FILE,e);_last_scan_time=datetime.now().isoformat();return e
+    with _scan_lock:
+        try:
+            run_scan()
+            html = generate_html()
+            with open(HTML_FILE, "w", encoding="utf-8") as f:
+                f.write(html)
+            _last_scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception as e:
+            print(f"Refresh error: {e}")
 
-def fetch_remote_file(url,name=None):
-    try:
-        os.makedirs(UPLOAD_DIR,exist_ok=True)
-        with requests.get(url,stream=True,timeout=(15,60),allow_redirects=True,headers={'User-Agent':'Software-Library/8.0'}) as r:
-            r.raise_for_status();length=int(r.headers.get('Content-Length','0') or 0)
-            if length>MAX_DOWNLOAD_SIZE:raise ValueError('远程文件超过2GB限制')
-            fn=sanitize_filename(name or os.path.basename(urllib.parse.urlparse(r.url).path) or 'download.bin');base,ext=os.path.splitext(fn);dest=os.path.join(UPLOAD_DIR,fn);i=1
-            while os.path.exists(dest):dest=os.path.join(UPLOAD_DIR,f'{base}_{i}{ext}');i+=1
-            total=0
-            with open(dest,'wb') as f:
-                for chunk in r.iter_content(1024*1024):
-                    if not chunk:continue
-                    total+=len(chunk)
-                    if total>MAX_DOWNLOAD_SIZE:raise ValueError('远程文件超过2GB限制')
-                    f.write(chunk)
-        run_scan();print(f'[remote] saved {dest} ({format_size(total)})')
-    except Exception as e:print(f'[remote] {e}')
 
-def _multipart_upload(self):
-    # Minimal multipart parser for a single uploaded file, avoiding deprecated cgi.
-    import email.parser
-    ctype=self.headers.get('Content-Type','')
-    if 'multipart/form-data' not in ctype:return False
-    boundary=ctype.split('boundary=',1)[-1].strip().strip('"')
-    if not boundary:return False
-    n=int(self.headers.get('Content-Length','0') or 0)
-    if n>MAX_UPLOAD_SIZE+2*1024*1024:return False
-    raw=self.rfile.read(n);marker=('--'+boundary).encode();parts=raw.split(marker)
-    for part in parts:
-        if b'filename=' not in part:continue
-        head,sep,body=part.partition(b'\r\n\r\n')
-        if not sep:continue
-        m=re.search(br'filename="([^"]*)"',head)
-        if not m:continue
-        fn=sanitize_filename(m.group(1).decode('utf-8','replace'));body=body.rsplit(b'\r\n',1)[0]
-        if len(body)>MAX_UPLOAD_SIZE:return False
-        os.makedirs(UPLOAD_DIR,exist_ok=True);dest=os.path.join(UPLOAD_DIR,fn);base,ext=os.path.splitext(fn);i=1
-        while os.path.exists(dest):dest=os.path.join(UPLOAD_DIR,f'{base}_{i}{ext}');i+=1
-        with open(dest,'wb') as f:f.write(body)
-        run_scan();_send_json(self,{'success':True,'filename':fn,'size':len(body)});return True
-    return False
+def refresh_library_async():
+    if _scan_lock.locked():
+        return
+    threading.Thread(target=refresh_library, daemon=True).start()
 
-_old_post=SoftwareHandler.do_POST
-def do_post_final(self):
-    if self.path.split('?',1)[0]=='/api/upload':
-        if not _get_session(self):return _send_json(self,{'success':False,'error':'请先登录'},401)
-        if _multipart_upload(self):return
-        return _send_json(self,{'success':False,'error':'上传数据无效'},400)
-    return _old_post(self)
-SoftwareHandler.do_POST=do_post_final
+# ============================================================
+# HTML generator (SPA)
+# ============================================================
 
-# Replace the generated-page hook with the actual renderer.
-def generate_html():return regenerate_html()
+def generate_html():
+    sw_list = build_software_list()
+    categories = {}
+    for sw in sw_list:
+        cat = sw["category"]
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(sw)
+
+    total_files = sum(len(sw["versions"]) for sw in sw_list)
+    total_size = sum(v["size"] for sw in sw_list for v in sw["versions"])
+    total_size_text = format_size(total_size)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    has_registered_users = has_users()
+
+    cat_icons = json.dumps(CAT_ICON_MAP, ensure_ascii=False)
+    all_icons = {}
+    for name in set(get_svg(n) and n for n in list(CAT_ICON_MAP.values()) + [sw["icon"] for sw in sw_list] + ["download","upload","link","copy","refresh","search","package","edit","plus","back","external","chevron","settings","file","folder","layers","user","users","logout","save","close","lock","box","menu"]):
+        all_icons[name] = SVG_ICONS.get(name, SVG_ICONS["box"])
+
+    icons_json = json.dumps(all_icons, ensure_ascii=False)
+    cat_icons_json = cat_icons
+
+    # ---- CSS ----
+    css = """<style>
+:root{
+--bg:#f5f6f8;--bg-card:#fff;--bg-search:#eef0f3;--text:#1a1d28;--text-dim:#6b7280;
+--text-bright:#111827;--accent:#4f7cff;--accent-glow:rgba(79,124,255,0.15);
+--accent-soft:rgba(79,124,255,0.06);--border:#e0e3eb;--border-bright:#c8ccd6;
+--radius:12px;--green:#16a34a;--orange:#d97706;--red:#dc2626;
+--shadow:0 2px 12px rgba(0,0,0,0.06);--shadow-lg:0 4px 24px rgba(0,0,0,0.08);
+--purple:#534AB7;--purple-soft:#EEEDFE;
+}
+*{margin:0;padding:0;box-sizing:border-box;}
+body{font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh;}
+.header{position:sticky;top:0;z-index:100;background:rgba(255,255,255,0.92);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-bottom:1px solid var(--border);padding:10px 0;}
+.header-inner{max-width:1400px;margin:0 auto;padding:0 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+.logo{display:flex;align-items:center;gap:10px;flex-shrink:0;cursor:pointer;}
+.logo-icon{width:36px;height:36px;border-radius:8px;background:linear-gradient(135deg,var(--accent),#6b5cff);display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow);}
+.logo-icon svg{width:18px;height:18px;color:#fff;}
+.logo-text h1{font-size:16px;color:var(--text-bright);font-weight:700;display:flex;align-items:center;gap:6px;}
+.logo-text span{font-size:10px;color:var(--text-dim);display:block;}
+.search-box{flex:1;min-width:150px;position:relative;}
+.search-box input{width:100%;padding:8px 12px 8px 36px;background:var(--bg-search);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:13px;transition:all 0.2s;}
+.search-box input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow);}
+.search-box .search-icon{position:absolute;left:10px;top:50%;transform:translateY(-50%);color:var(--text-dim);width:14px;height:14px;display:flex;align-items:center;}
+.search-box .search-icon svg{width:14px;height:14px;}
+.stats{display:flex;gap:12px;flex-shrink:0;}
+.stat-item{text-align:center;}
+.stat-item .num{font-size:14px;font-weight:700;color:var(--accent);}
+.stat-item .label{font-size:9px;color:var(--text-dim);}
+.header-btns{display:flex;gap:4px;flex-shrink:0;}
+.header-btn{display:inline-flex;align-items:center;gap:4px;padding:6px 10px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;background:var(--bg-card);border:1px solid var(--border-bright);color:var(--text-dim);transition:all 0.15s;text-decoration:none;}
+.header-btn:hover{border-color:var(--accent);color:var(--accent);}
+.header-btn svg{width:12px;height:12px;}
+.header-btn.admin-btn{background:var(--purple-soft);border-color:var(--purple);color:var(--purple);}
+.header-btn.danger{color:var(--red);border-color:var(--red);}
+.header-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent);}
+.header-btn.primary:hover{background:#3a6aff;}
+/* Dropdown menu */
+.dropdown{position:relative;display:inline-block;}
+.dropdown-menu{display:none;position:absolute;right:0;top:100%;min-width:160px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow-lg);z-index:200;padding:4px 0;margin-top:4px;}
+.dropdown-menu.show{display:block;}
+.dropdown-menu a,.dropdown-menu button{display:flex;align-items:center;gap:8px;padding:8px 16px;font-size:13px;color:var(--text);text-decoration:none;background:none;border:none;width:100%;text-align:left;cursor:pointer;transition:background 0.1s;}
+.dropdown-menu a:hover,.dropdown-menu button:hover{background:var(--accent-soft);color:var(--accent);}
+.dropdown-menu .divider{height:1px;background:var(--border);margin:4px 0;}
+.cat-filter{display:flex;align-items:center;gap:7px;padding:0;flex-wrap:nowrap;}
+.cat-filter label{font-size:11px;color:var(--text-dim);white-space:nowrap;}
+.cat-filter select{padding:6px 30px 6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--bg-card);color:var(--text);font-size:12px;cursor:pointer;outline:none;max-width:240px;}
+.cat-filter select:focus{border-color:var(--accent);}
+.cat-bar{display:flex;align-items:center;gap:10px;padding:6px 16px;max-width:1400px;margin:0 auto;border-bottom:1px solid var(--border);background:rgba(255,255,255,0.6);flex-wrap:wrap;}
+.container{max-width:1400px;margin:0 auto;padding:16px;}
+.section{margin-bottom:24px;}
+.section-header{display:flex;align-items:center;gap:8px;margin-bottom:12px;padding-bottom:6px;border-bottom:1px solid var(--border);}
+.section-header h2{font-size:15px;color:var(--text-bright);}
+.section-header .cat-icon{width:18px;height:18px;color:var(--accent);}
+.section-header .cat-icon svg{width:18px;height:18px;}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:14px;transition:all 0.2s;display:flex;flex-direction:column;gap:8px;box-shadow:var(--shadow);cursor:pointer;}
+.card:hover{border-color:var(--border-bright);box-shadow:var(--shadow-lg);transform:translateY(-1px);}
+.card-top{display:flex;align-items:flex-start;gap:10px;}
+.card-icon{width:40px;height:40px;border-radius:8px;background:var(--bg-search);display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--accent);}
+.card-icon svg{width:20px;height:20px;}
+.card-info{flex:1;min-width:0;}
+.card-title{font-size:13px;font-weight:600;color:var(--text-bright);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.card-desc{font-size:11px;color:var(--text-dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+.card-meta{display:flex;flex-wrap:wrap;gap:4px;font-size:10px;}
+.meta-tag{display:inline-flex;align-items:center;gap:2px;padding:1px 6px;border-radius:3px;background:rgba(0,0,0,0.03);}
+.meta-tag.type{color:var(--orange);}
+.meta-tag.size{color:var(--green);}
+.meta-tag.date{color:var(--text-dim);}
+.card-footer{display:flex;align-items:center;justify-content:space-between;margin-top:2px;}
+.card-versions-count{font-size:11px;color:var(--text-dim);display:inline-flex;align-items:center;gap:3px;}
+.card-versions-count svg{width:12px;height:12px;}
+.card-chevron{color:var(--text-dim);}
+.card-chevron svg{width:14px;height:14px;}
+.official-badge{display:inline-flex;align-items:center;gap:3px;font-size:9px;color:var(--green);background:rgba(22,163,74,0.08);padding:1px 5px;border-radius:3px;}
+.official-badge svg{width:10px;height:10px;}
+.no-results{text-align:center;padding:40px 16px;color:var(--text-dim);}
+.footer{text-align:center;padding:16px;color:var(--text-dim);font-size:11px;border-top:1px solid var(--border);margin-top:24px;}
+.version-list{display:flex;flex-direction:column;gap:8px;}
+.version-item{display:flex;align-items:center;gap:12px;padding:10px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);transition:all 0.2s;}
+.version-item:hover{border-color:var(--border-bright);box-shadow:var(--shadow);}
+.version-info{flex:1;min-width:0;}
+.version-filename{font-size:14px;font-weight:600;color:var(--text-bright);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.version-meta{font-size:11px;color:var(--text-dim);margin-top:1px;}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:4px;padding:6px 14px;border-radius:6px;font-size:12px;font-weight:500;cursor:pointer;text-decoration:none;transition:all 0.15s;border:none;}
+.btn svg{width:14px;height:14px;}
+.btn-download{background:var(--accent);color:#fff;}
+.btn-download:hover{background:#3a6aff;}
+.btn-official{background:transparent;border:1px solid var(--green);color:var(--green);}
+.btn-official:hover{background:rgba(22,163,74,0.08);}
+.btn-external{background:transparent;border:1px solid var(--purple);color:var(--purple);}
+.btn-external:hover{background:var(--purple-soft);}
+.btn-back{background:transparent;border:1px solid var(--border-bright);color:var(--text-dim);}
+.btn-back:hover{border-color:var(--accent);color:var(--accent);}
+.btn-primary{background:var(--accent);color:#fff;}
+.btn-primary:hover{background:#3a6aff;}
+.btn-danger{background:transparent;border:1px solid var(--red);color:var(--red);}
+.btn-danger:hover{background:rgba(220,38,38,0.08);}
+.btn-sm{padding:4px 8px;font-size:11px;}
+.btn-xs{padding:2px 6px;font-size:10px;}
+.breadcrumb{display:flex;align-items:center;gap:6px;margin-bottom:14px;font-size:12px;color:var(--text-dim);}
+.breadcrumb a{cursor:pointer;color:var(--text-dim);text-decoration:none;}
+.breadcrumb a:hover{color:var(--accent);}
+.breadcrumb svg{width:12px;height:12px;}
+.scan-badge{display:inline-flex;align-items:center;gap:3px;font-size:10px;color:var(--text-dim);}
+.scan-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;animation:pulse 2s infinite;}
+@keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.4;}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:translateY(0);}}
+.card{animation:fadeIn 0.25s ease-out;}
+@keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
+.spinning svg{animation:spin 1s linear infinite;}
+@media(max-width:768px){.header-inner{flex-direction:column;align-items:stretch;}.stats{justify-content:center;}.grid{grid-template-columns:1fr;}}
+::-webkit-scrollbar{width:6px;height:6px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:var(--border-bright);border-radius:3px;}
+::-webkit-scrollbar-thumb:hover{background:#a8acb8;}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1a1d28;color:#fff;padding:8px 20px;border-radius:6px;font-size:13px;z-index:9999;opacity:0;transition:opacity 0.3s;box-shadow:0 4px 12px rgba(0,0,0,0.2);}
+.toast.show{opacity:1;}
+/* Auth modal */
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);z-index:2000;display:flex;align-items:center;justify-content:center;}
+.modal{background:var(--bg-card);border-radius:12px;padding:24px;max-width:400px;width:90%;box-shadow:var(--shadow-lg);}
+.modal h2{font-size:18px;color:var(--text-bright);margin-bottom:16px;display:flex;align-items:center;gap:8px;}
+.modal h2 svg{width:20px;height:20px;color:var(--accent);}
+.form-group{margin-bottom:12px;}
+.form-group label{display:block;font-size:12px;color:var(--text-dim);margin-bottom:4px;}
+.form-group input{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;color:var(--text);outline:none;transition:all 0.2s;}
+.form-group input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow);}
+.modal-btns{display:flex;gap:8px;margin-top:16px;}
+.modal-error{color:var(--red);font-size:12px;margin-bottom:8px;display:none;}
+/* Admin panels */
+.admin-section{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:16px;}
+.admin-section h3{font-size:14px;color:var(--text-bright);margin-bottom:12px;display:flex;align-items:center;gap:6px;}
+.admin-section h3 svg{width:16px;height:16px;color:var(--purple);}
+.edit-row{display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--border);flex-wrap:wrap;}
+.admin-toolbar{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:12px;}
+.admin-search{flex:1;min-width:220px;padding:8px 10px;border:1px solid var(--border);border-radius:7px;font-size:12px;outline:none;}
+.admin-search:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow);}
+.admin-grid{display:grid;grid-template-columns:minmax(130px,.8fr) minmax(220px,1.5fr) minmax(220px,1.5fr) auto;gap:8px;align-items:center;}
+.admin-grid input{width:100%;min-width:0;}
+.admin-actions{display:flex;gap:5px;flex-wrap:wrap;}
+.edit-row:last-child{border-bottom:none;}
+.edit-row input{flex:1;min-width:120px;padding:5px 8px;border:1px solid var(--border);border-radius:4px;font-size:12px;outline:none;}
+.edit-row input:focus{border-color:var(--accent);}
+.edit-row label{font-size:11px;color:var(--text-dim);min-width:80px;}
+.upload-area{border:2px dashed var(--border-bright);border-radius:10px;padding:30px;text-align:center;cursor:pointer;transition:all 0.2s;}
+.upload-area:hover{border-color:var(--accent);background:var(--accent-soft);}
+.upload-area svg{width:32px;height:32px;color:var(--text-dim);margin-bottom:8px;}
+.upload-area p{color:var(--text-dim);font-size:13px;}
+.upload-progress{margin-top:10px;}
+.progress-bar{width:100%;height:4px;background:var(--bg-search);border-radius:2px;overflow:hidden;}
+.progress-fill{height:100%;background:var(--accent);transition:width 0.3s;}
+.user-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);flex-wrap:wrap;}
+.user-row:last-child{border-bottom:none;}
+.user-row .user-info{flex:1;}
+.user-row .user-name{font-size:13px;font-weight:500;color:var(--text-bright);}
+.user-row .user-role{font-size:11px;color:var(--text-dim);}
+.role-badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:500;}
+.role-badge.admin{background:var(--purple-soft);color:var(--purple);}
+.role-badge.user{background:var(--accent-soft);color:var(--accent);}
+</style>"""
+
+    # ---- HTML body ----
+    body = f"""</head>
+<body>
+<div class="header"><div class="header-inner">
+  <div class="logo" onclick="goHome()"><div class="logo-icon">{get_svg("package")}</div><div class="logo-text"><h1>软件库</h1></div></div>
+  <div class="search-box"><span class="search-icon">{get_svg("search")}</span><input type="text" id="searchInput" placeholder="搜索软件..." autocomplete="off" oninput="onSearch(this.value)"></div>
+  <div class="stats"><div class="stat-item"><div class="num" id="statCount">{total_files}</div><div class="label">文件</div></div><div class="stat-item"><div class="num">{len(categories)}</div><div class="label">分类</div></div><div class="stat-item"><div class="num">{total_size_text}</div><div class="label">总量</div></div></div>
+  <div class="header-btns" id="headerBtns"></div>
+</div></div>
+<div class="cat-bar"><div class="cat-filter"><label for="catSelect">分类</label><select id="catSelect" onchange="selectCategory(this.value)"></select></div></div>
+<div class="container" id="container"></div>
+<div class="footer"><p>软件库 · 共 {total_files} 个文件 · 总计 {total_size_text}</p><p style="margin-top:2px;">最后更新: {now_str}</p></div>
+<div id="modalContainer"></div>
+"""
+
+    # ---- JS ----
+    js = """<script>
+const ICONS=__ICONS_JSON__;
+const CAT_ICONS=__CAT_ICONS_JSON__;
+const HAS_USERS=__HAS_USERS__;
+let SESSION=null;
+let ALL_DATA=[];
+let currentView='home',currentSoftware=null,searchTerm='',currentCat='all';
+
+function svg(n,s){const v=ICONS[n]||ICONS['box'];return '<span style="width:'+(s||26)+'px;height:'+(s||26)+'px;display:inline-flex;align-items:center;justify-content:center">'+v+'</span>';}
+function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+
+function showToast(msg){let t=document.getElementById('toast');if(!t){t=document.createElement('div');t.id='toast';t.className='toast';document.body.appendChild(t);}t.textContent=msg;t.classList.add('show');clearTimeout(t._timer);t._timer=setTimeout(()=>t.classList.remove('show'),2500);}
+
+function getCookie(n){const m=document.cookie.match(new RegExp('(^| )'+n+'=([^;]+)'));return m?m[2]:'';}
+function setCookie(n,v,d){const e=new Date();e.setTime(e.getTime()+d*86400000);document.cookie=n+'='+v+';expires='+e.toUTCString()+';path=/';}
+function delCookie(n){document.cookie=n+'=;expires=Thu,01 Jan 1970 00:00:00 UTC;path=/';}
+
+async function api(url,opts){
+  opts=opts||{};
+  opts.headers=opts.headers||{};
+  if(SESSION&&SESSION.token)opts.headers['X-Session']=SESSION.token;
+  if(opts.body&&typeof opts.body==='object'){opts.headers['Content-Type']='application/json';opts.body=JSON.stringify(opts.body);}
+  const r=await fetch(url,opts);
+  return r.json();
+}
+
+function renderHeaderBtns(){
+  const c=document.getElementById('headerBtns');
+  if(!SESSION){
+    if(HAS_USERS){
+      c.innerHTML='<button class="header-btn" onclick="showLogin()">'+svg('lock',12)+' 登录</button>';
+    }else{
+      c.innerHTML='<button class="header-btn primary" onclick="showRegister()">'+svg('user',12)+' 注册管理员</button>';
+    }
+    return;
+  }
+  // Logged in
+  let h='';
+  if(SESSION.role==='admin'){
+    h+='<button class="header-btn admin-btn" onclick="goAdmin()">'+svg('settings',12)+' 管理面板</button>';
+  }
+  h+='<div class="dropdown" id="userDropdown">';
+  h+='<button class="header-btn" onclick="toggleDropdown()">'+svg('user',12)+' '+esc(SESSION.username)+' '+svg('chevron',10)+'</button>';
+  h+='<div class="dropdown-menu" id="dropdownMenu">';
+  h+='<button onclick="doUpload()">'+svg('upload',12)+' 上传文件</button>';
+  h+='<div class="divider"></div>';
+  h+='<button onclick="doLogout()" style="color:var(--red)">'+svg('logout',12)+' 退出</button>';
+  h+='</div></div>';
+  c.innerHTML=h;
+}
+
+function toggleDropdown(){
+  const m=document.getElementById('dropdownMenu');
+  m.classList.toggle('show');
+}
+document.addEventListener('click',function(e){
+  const d=document.getElementById('userDropdown');
+  if(d&&!d.contains(e.target)){const m=document.getElementById('dropdownMenu');if(m)m.classList.remove('show');}
+});
+
+function showLogin(){
+  const mc=document.getElementById('modalContainer');
+  mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>'+svg('lock',20)+' 登录</h2><div class="modal-error" id="loginErr"></div><div class="form-group"><label>用户名</label><input type="text" id="loginUser" placeholder="输入用户名" autocomplete="username"></div><div class="form-group"><label>密码</label><input type="password" id="loginPass" placeholder="输入密码" autocomplete="current-password" onkeydown="if(event.key===\\'Enter\\')doLogin()"></div><div class="modal-btns"><button class="btn btn-primary" style="flex:1" onclick="doLogin()">'+svg('lock',12)+' 登录</button><button class="btn btn-back" onclick="closeModal()">取消</button></div></div></div>';
+  setTimeout(()=>document.getElementById('loginUser').focus(),100);
+}
+function showRegister(){
+  const mc=document.getElementById('modalContainer');
+  mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>'+svg('user',20)+' 注册管理员</h2><p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">首次使用，请创建管理员账号。</p><div class="modal-error" id="regErr"></div><div class="form-group"><label>用户名</label><input type="text" id="regUser" placeholder="创建用户名"></div><div class="form-group"><label>密码</label><input type="password" id="regPass" placeholder="创建密码"></div><div class="form-group"><label>确认密码</label><input type="password" id="regPass2" placeholder="再次输入密码" onkeydown="if(event.key===\\'Enter\\')doRegister()"></div><div class="modal-btns"><button class="btn btn-primary" style="flex:1" onclick="doRegister()">'+svg('plus',12)+' 注册</button></div></div></div>';
+  setTimeout(()=>document.getElementById('regUser').focus(),100);
+}
+function closeModal(){document.getElementById('modalContainer').innerHTML='';}
+
+async function doLogin(){
+  const u=document.getElementById('loginUser').value.trim();
+  const p=document.getElementById('loginPass').value;
+  if(!u||!p){document.getElementById('loginErr').style.display='block';document.getElementById('loginErr').textContent='请填写用户名和密码';return;}
+  const r=await api('/api/login',{method:'POST',body:{username:u,password:p}});
+  if(r.success){SESSION={token:r.session,username:r.username||u,role:r.role};setCookie('session',r.session,7);closeModal();renderHeaderBtns();render();showToast('登录成功');}
+  else{document.getElementById('loginErr').style.display='block';document.getElementById('loginErr').textContent=r.error||'登录失败';}
+}
+async function doRegister(){
+  const u=document.getElementById('regUser').value.trim();
+  const p=document.getElementById('regPass').value;
+  const p2=document.getElementById('regPass2').value;
+  if(!u||!p){document.getElementById('regErr').style.display='block';document.getElementById('regErr').textContent='请填写用户名和密码';return;}
+  if(p!==p2){document.getElementById('regErr').style.display='block';document.getElementById('regErr').textContent='两次密码不一致';return;}
+  const r=await api('/api/register',{method:'POST',body:{username:u,password:p}});
+  if(r.success){SESSION={token:r.session,username:u,role:'admin'};setCookie('session',r.session,7);closeModal();renderHeaderBtns();render();showToast('注册成功！');}
+  else{document.getElementById('regErr').style.display='block';document.getElementById('regErr').textContent=r.error||'注册失败';}
+}
+function doLogout(){delCookie('session');SESSION=null;renderHeaderBtns();render();showToast('已退出');}
+
+function goHome(){currentView='home';currentSoftware=null;render();}
+function goAdmin(){if(!SESSION||SESSION.role!=='admin')return;currentView='admin';render();}
+function goVersion(name){currentView='version';currentSoftware=name;render();}
+function onSearch(v){searchTerm=v.toLowerCase().trim();if(currentView!=='home')goHome();render();}
+function selectCategory(cat){currentCat=cat;render();}
+
+function getFiltered(){let d=ALL_DATA;if(currentCat!=='all')d=d.filter(s=>s.category===currentCat);if(searchTerm)d=d.filter(s=>(s.name+' '+s.desc+' '+s.category).toLowerCase().includes(searchTerm));return d;}
+
+function renderCatSelect(){
+  const box=document.getElementById('catSelect');
+  if(!box)return;
+  const cats=['all',...new Set(ALL_DATA.map(s=>s.category))];
+  box.innerHTML=cats.map(c=>{
+    const n=c==='all'?ALL_DATA.length:ALL_DATA.filter(s=>s.category===c).length;
+    return '<option value="'+esc(c)+'"'+(currentCat===c?' selected':'')+'>'+(c==='all'?'全部分类':esc(c))+' · '+n+' 个软件</option>';
+  }).join('');
+}
+
+function render(){
+  const c=document.getElementById('container');
+  if(currentView==='home')renderHome(c);
+  else if(currentView==='version')renderVersionPage(c);
+  else if(currentView==='admin')renderAdmin(c);
+}
+
+function renderHome(c){
+  renderCatSelect();
+  const d=getFiltered();
+  document.getElementById('statCount').textContent=d.reduce((a,s)=>a+s.versions.length,0);
+  if(d.length===0){c.innerHTML='<div class="no-results">'+svg('search',40)+'<p style="margin-top:12px;">没有找到匹配的软件</p></div>';return;}
+  const grouped={};d.forEach(s=>{if(!grouped[s.category])grouped[s.category]=[];grouped[s.category].push(s);});
+  let h='';
+  for(const cat of Object.keys(grouped).sort()){
+    const items=grouped[cat];
+    h+='<div class="section"><div class="section-header">'+svg(CAT_ICONS[cat]||'box',18)+'<h2>'+esc(cat)+' ('+items.length+')</h2></div><div class="grid">';
+    for(const sw of items){
+      const vc=sw.versions.length;const latest=sw.versions[0]||{};
+      h+='<div class="card" onclick="goVersion(\\''+esc(sw.name).replace(/'/g,"\\\\'")+'\\')"><div class="card-top"><div class="card-icon">'+svg(sw.icon,20)+'</div><div class="card-info"><div class="card-title">'+esc(sw.name)+'</div><div class="card-desc">'+esc(sw.desc)+'</div></div></div><div class="card-meta"><span class="meta-tag type">'+(latest.fileType||'')+'</span><span class="meta-tag size">'+(latest.sizeText||'')+'</span>';
+      if(latest.date)h+='<span class="meta-tag date">'+latest.date+'</span>';
+      h+='</div><div class="card-footer">';
+      if(sw.showOfficial&&(sw.official||sw.customOfficial))h+='<span class="official-badge">'+svg('external',10)+' 官网</span>';
+      if(sw.downloadUrl)h+='<span class="official-badge" style="color:var(--accent);background:var(--accent-soft);">'+svg('download',10)+' 直链</span>';
+      h+='<span class="card-versions-count">'+svg('layers',12)+vc+' 个版本</span><span class="card-chevron">'+svg('chevron',14)+'</span></div></div>';
+    }
+    h+='</div></div>';
+  }
+  c.innerHTML=h;
+}
+
+function renderVersionPage(c){
+  const sw=ALL_DATA.find(s=>s.name===currentSoftware);
+  if(!sw){goHome();return;}
+  let h='<div class="breadcrumb"><a onclick="goHome()">'+svg('back',12)+' 返回首页</a> / <span>'+esc(sw.name)+'</span></div>';
+  h+='<div class="section"><div class="section-header">'+svg(sw.icon,20)+'<h2>'+esc(sw.name)+'</h2>';
+  if(sw.showOfficial){
+    const officialUrl=sw.customOfficial||sw.official;
+    if(officialUrl)h+='<a class="btn btn-external" href="'+esc(officialUrl)+'" target="_blank" rel="noopener">'+svg('external',12)+' 官网</a>';
+  }
+  if(sw.downloadUrl)h+='<a class="btn btn-download" href="'+esc(sw.downloadUrl)+'" target="_blank" rel="noopener">'+svg('download',12)+' 官方下载地址</a>';
+  h+='</div><div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">'+esc(sw.desc)+'</div><div class="version-list">';
+  for(const v of sw.versions){
+    const dlUrl='/download/'+encodeURIComponent(v.path);
+    h+='<div class="version-item"><div class="card-icon" style="width:32px;height:32px">'+svg(sw.icon,16)+'</div><div class="version-info"><div class="version-filename">'+esc(v.filename)+'</div><div class="version-meta">'+esc(v.fileType)+' · '+v.sizeText+(v.date?(' · '+v.date):'')+'</div></div><a class="btn btn-download" href="'+dlUrl+'" download="'+esc(v.filename)+'">'+svg('download',12)+' 下载</a></div>';
+  }
+  h+='</div></div>';
+  if(sw.downloadUrl)h+='<div style="font-size:11px;color:var(--text-dim);margin-top:8px;text-align:center;">远程下载地址已配置，管理员可在管理面板执行“下载留存”。</div>';
+  c.innerHTML=h;
+}
+
+function renderAdmin(c){
+  if(!SESSION||SESSION.role!=='admin'){c.innerHTML='<div class="no-results">'+svg('lock',40)+'<p style="margin-top:12px;">需要管理员权限</p></div>';return;}
+  let h='<div class="breadcrumb"><a onclick="goHome()">'+svg('back',12)+' 返回软件库</a> / <span>管理面板</span></div>';
+  h+='<div class="admin-section"><div class="admin-toolbar"><div><h3>'+svg('package',16)+' 软件管理</h3><p style="color:var(--text-dim);font-size:12px;">只有管理员可以修改官网、下载地址和软件展示设置。</p></div><input class="admin-search" id="adminSoftwareSearch" placeholder="搜索软件名称..." oninput="filterAdminSoftware(this.value)"></div><div id="adminSoftwareList">';
+  h+=renderAdminSoftwareRows('');
+  h+='</div></div>';
+  h+='<div class="admin-section"><h3>'+svg('users',16)+' 用户管理</h3><div id="userList">加载中...</div>';
+  h+='<div class="edit-row" style="margin-top:10px;"><input type="text" id="newUser" placeholder="新用户名" style="flex:1;"><input type="password" id="newPass" placeholder="密码" style="flex:1;"><select id="newRole" style="padding:7px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px;"><option value="user">普通用户</option><option value="admin">管理员</option></select><button class="btn btn-sm btn-primary" onclick="addUser()">'+svg('plus',12)+' 添加账户</button></div></div>';
+  h+='<div class="admin-section"><h3>'+svg('refresh',16)+' 系统管理</h3><button class="btn btn-primary" id="rescanBtn" onclick="doRescan()">'+svg('refresh',12)+' 重新扫描</button></div>';
+  c.innerHTML=h;
+  loadUserList();
+}
+
+function renderAdminSoftwareRows(keyword){
+  const q=(keyword||'').toLowerCase().trim(); let h='';
+  for(const sw of ALL_DATA){
+    if(q && !(sw.name+' '+sw.category+' '+sw.desc).toLowerCase().includes(q))continue;
+    const id=sw.name.replace(/[^a-zA-Z0-9]/g,'_');
+    h+='<div class="edit-row admin-grid">';
+    h+='<div><strong style="font-size:12px;color:var(--text-bright)">'+esc(sw.name)+'</strong><div style="font-size:10px;color:var(--text-dim)">'+esc(sw.category)+'</div></div>';
+    h+='<input type="text" id="official_'+id+'" value="'+esc(sw.customOfficial||sw.official||'')+'" placeholder="官网地址">';
+    h+='<input type="text" id="download_'+id+'" value="'+esc(sw.downloadUrl||'')+'" placeholder="官方下载直链（可留存）">';
+    h+='<div class="admin-actions">';
+    h+='<button class="btn btn-xs '+(sw.showOfficial?'btn-danger':'btn-primary')+'" data-name="'+esc(sw.name)+'" onclick="toggleOfficial(this.dataset.name)">'+(sw.showOfficial?'隐藏官网':'显示官网')+'</button>';
+    h+='<button class="btn btn-xs btn-primary" data-name="'+esc(sw.name)+'" onclick="saveOfficial(this.dataset.name)">'+svg('save',11)+' 保存</button>';
+    h+='<button class="btn btn-xs btn-external" data-name="'+esc(sw.name)+'" onclick="testOfficial(this.dataset.name)">'+svg('external',11)+'</button>';
+    if(sw.downloadUrl)h+='<button class="btn btn-xs btn-download" data-name="'+esc(sw.name)+'" onclick="fetchRemoteFile(this.dataset.name)">'+svg('download',11)+' 下载留存</button>';
+    h+='</div></div>';
+  }
+  return h||'<div style="padding:20px;text-align:center;color:var(--text-dim);font-size:12px;">没有匹配的软件</div>';
+}
+function filterAdminSoftware(keyword){const box=document.getElementById('adminSoftwareList');if(box)box.innerHTML=renderAdminSoftwareRows(keyword);}
+
+async function loadUserList(){
+  const r=await api('/api/users'); if(!r.success)return; let h='';
+  for(const u of r.users){
+    h+='<div class="user-row"><div class="user-info"><div class="user-name">'+esc(u.username)+'</div><div class="user-role">'+esc(u.created||'')+'</div></div><span class="role-badge '+u.role+'">'+(u.role==='admin'?'管理员':'普通用户')+'</span>';
+    if(u.username!==SESSION.username)h+='<button class="btn btn-sm btn-danger" data-name="'+esc(u.username)+'" onclick="delUser(this.dataset.name)">删除</button>';
+    h+='</div>';
+  }
+  document.getElementById('userList').innerHTML=h||'<p style="color:var(--text-dim);font-size:12px;">暂无其他用户</p>';
+}
+
+async function addUser(){
+  const u=document.getElementById('newUser').value.trim(),p=document.getElementById('newPass').value,r2=document.getElementById('newRole').value;
+  if(!u||!p){showToast('请填写用户名和密码');return;}
+  const r=await api('/api/users',{method:'POST',body:{username:u,password:p,role:r2}});
+  if(r.success){showToast('用户已添加');loadUserList();document.getElementById('newUser').value='';document.getElementById('newPass').value='';}else showToast(r.error||r.message||'添加失败');
+}
+async function delUser(name){
+  if(!confirm('确认删除用户 '+name+'？'))return; const r=await api('/api/users/'+encodeURIComponent(name),{method:'DELETE'});
+  if(r.success){showToast('已删除');loadUserList();}else showToast(r.error||r.message||'删除失败');
+}
+
+async function toggleOfficial(name){
+  const sw=ALL_DATA.find(s=>s.name===name);if(!sw)return; const newVal=!sw.showOfficial;
+  const r=await api('/api/admin/software',{method:'PUT',body:{name:name,showOfficial:newVal}});
+  if(r.success){sw.showOfficial=newVal;const q=document.getElementById('adminSoftwareSearch')?.value||'';renderAdmin(document.getElementById('container'));setTimeout(()=>{const i=document.getElementById('adminSoftwareSearch');if(i){i.value=q;filterAdminSoftware(q);}},0);showToast(newVal?'已显示官网':'已隐藏官网');}else showToast(r.error||'操作失败');
+}
+async function saveOfficial(name){
+  const id=name.replace(/[^a-zA-Z0-9]/g,'_'); const official=document.getElementById('official_'+id)?.value.trim()||''; const download=document.getElementById('download_'+id)?.value.trim()||'';
+  if(official && !/^https?:\\/\\//i.test(official)){showToast('官网地址必须以 http:// 或 https:// 开头');return;}
+  if(download && !/^https?:\\/\\//i.test(download)){showToast('下载地址必须以 http:// 或 https:// 开头');return;}
+  const r=await api('/api/admin/software',{method:'PUT',body:{name:name,customOfficial:official,downloadUrl:download,showOfficial:!!official}});
+  if(r.success){const sw=ALL_DATA.find(s=>s.name===name);if(sw){sw.customOfficial=official;sw.downloadUrl=download;sw.showOfficial=!!official;}showToast('保存成功');const q=document.getElementById('adminSoftwareSearch')?.value||'';renderAdmin(document.getElementById('container'));setTimeout(()=>{const i=document.getElementById('adminSoftwareSearch');if(i){i.value=q;filterAdminSoftware(q);}},0);}else showToast(r.error||'保存失败');
+}
+async function testOfficial(name){const sw=ALL_DATA.find(s=>s.name===name);if(!sw)return;const url=sw.customOfficial||sw.official;if(url)window.open(url,'_blank','noopener');else showToast('该软件未设置官网地址');}
+async function fetchRemoteFile(name){
+  if(!SESSION||SESSION.role!=='admin'){showToast('只有管理员可以执行下载留存');return;}
+  const sw=ALL_DATA.find(s=>s.name===name);if(!sw||!sw.downloadUrl){showToast('未设置官方下载直链');return;}
+  if(!confirm('确定从远程地址下载并留存到软件库？\\n\\n'+sw.downloadUrl))return;
+  const r=await api('/api/admin/fetch',{method:'POST',body:{name:name,url:sw.downloadUrl}});
+  if(r.success){showToast('已开始后台下载，请留意进度提示');pollFetchStatus();}else showToast(r.error||'无法开始下载');
+}
+async function pollFetchStatus(){
+  try{
+    while(true){
+      const r=await api('/api/fetch-status');
+      if(r.active){showToast(r.message||'下载中...');await new Promise(res=>setTimeout(res,2000));continue;}
+      if(r.message)showToast(r.message);
+      if((r.message||'').indexOf('完成')===0){await loadData();render();setTimeout(()=>location.reload(),1200);}
+      break;
+    }
+  }catch(e){}
+}
+
+function doUpload(){
+  if(!SESSION){showToast('请先登录');return;}
+  const mc=document.getElementById('modalContainer');
+  mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal" style="max-width:480px;"><h2>'+svg('upload',20)+' 上传文件</h2><div class="upload-area" id="uploadArea" onclick="document.getElementById(\\'fileInput\\').click()">'+svg('upload',32)+'<p>点击或拖拽文件到此处上传</p></div><input type="file" id="fileInput" style="display:none" onchange="handleFile(this.files[0])"><div id="uploadProgress" style="display:none"><div class="upload-progress"><div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div><p style="text-align:center;margin-top:6px;font-size:12px;color:var(--text-dim)" id="uploadStatus">上传中...</p></div></div><div class="modal-btns"><button class="btn btn-back" onclick="closeModal()">关闭</button></div></div></div>';
+  const area=document.getElementById('uploadArea');
+  area.ondragover=function(e){e.preventDefault();this.style.borderColor='var(--accent)';this.style.background='var(--accent-soft)';};
+  area.ondragleave=function(e){e.preventDefault();this.style.borderColor='var(--border-bright)';this.style.background='transparent';};
+  area.ondrop=function(e){e.preventDefault();this.style.borderColor='var(--border-bright)';this.style.background='transparent';if(e.dataTransfer.files.length>0)handleFile(e.dataTransfer.files[0]);};
+}
+
+function handleFile(file){
+  if(!file)return;
+  const formData=new FormData();
+  formData.append('file',file);
+  document.getElementById('uploadProgress').style.display='block';
+  document.getElementById('uploadArea').style.display='none';
+  const xhr=new XMLHttpRequest();
+  xhr.upload.addEventListener('progress',function(e){if(e.lengthComputable){const pct=Math.round(e.loaded/e.total*100);document.getElementById('progressFill').style.width=pct+'%';document.getElementById('uploadStatus').textContent='上传中... '+pct+'%';}});
+  xhr.addEventListener('load',function(){const r=JSON.parse(xhr.responseText);if(r.success){showToast('上传成功');closeModal();setTimeout(()=>location.reload(),1000);}else{showToast(r.error||'上传失败');document.getElementById('uploadProgress').style.display='none';document.getElementById('uploadArea').style.display='block';}});
+  xhr.addEventListener('error',function(){showToast('上传失败');document.getElementById('uploadProgress').style.display='none';document.getElementById('uploadArea').style.display='block';});
+  xhr.open('POST','/api/upload');
+  if(SESSION&&SESSION.token)xhr.setRequestHeader('X-Session',SESSION.token);
+  xhr.send(formData);
+}
+
+async function doRescan(){
+  if(!SESSION||SESSION.role!=='admin'){showToast('只有管理员可以重新扫描');return;}
+  const btn=document.getElementById('rescanBtn')||document.querySelector('button[onclick*="doRescan"]');
+  if(!btn)return;
+  const orig=btn.innerHTML;
+  btn.disabled=true;btn.innerHTML=svg('refresh',12)+' 扫描中';
+  try{
+    const r=await api('/api/rescan',{method:'POST'});
+    if(r.success){showToast('扫描完成: '+r.totalFiles+' 个文件');setTimeout(()=>location.reload(),1500);}
+    else{showToast('扫描失败');btn.disabled=false;btn.innerHTML=orig;}
+  }catch(e){showToast('请求失败');btn.disabled=false;btn.innerHTML=orig;}
+}
+
+async function loadData(){
+  const r=await fetch('/api/software');
+  const d=await r.json();
+  if(d.success)ALL_DATA=d.data;
+}
+
+async function init(){
+  const token=getCookie('session');
+  if(token){
+    const r=await api('/api/session');
+    if(r.success){SESSION={token:token,username:r.username,role:r.role};}
+  }
+  await loadData();
+  renderHeaderBtns();
+  if(!SESSION&&!HAS_USERS){showRegister();}
+  else if(!SESSION&&HAS_USERS){showLogin();}
+  render();
+}
+init();
+</script>
+</body>
+</html>"""
+
+    js = js.replace("__ICONS_JSON__", icons_json)
+    js = js.replace("__CAT_ICONS_JSON__", cat_icons_json)
+    js = js.replace("__HAS_USERS__", "true" if has_registered_users else "false")
+
+    html = "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>软件库 | Software Library</title>\n" + css + "\n" + body + js
+    return html
+
+# ============================================================
+# HTTP Handler
+# ============================================================
+
+_scan_lock = threading.Lock()
+_last_scan_time = ""
+
+class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=DATA_DIR, **kwargs)
+
+    def _get_session(self):
+        token = self.headers.get('X-Session', '')
+        if not token:
+            cookie = self.headers.get('Cookie', '')
+            m = re.search(r'session=([a-f0-9]+)', cookie)
+            if m:
+                token = m.group(1)
+        return get_session(token)
+
+    def _require_auth(self, role=None):
+        s = self._get_session()
+        if not s:
+            self._serve_json({"success": False, "error": "未登录"})
+            return None
+        if role and s.get("role") != role:
+            self._serve_json({"success": False, "error": "权限不足"})
+            return None
+        return s
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = urllib.parse.unquote(parsed.path)
+
+        if path == '/' or path == '/index.html':
+            self._serve_file(HTML_FILE, 'text/html; charset=utf-8')
+            return
+
+        if path.startswith('/download/'):
+            rel_path = path[len('/download/'):]
+            rel_path = rel_path.replace("\\", "/")
+            if rel_path.startswith(UPLOAD_URL_PREFIX):
+                base, rel = UPLOAD_DIR, rel_path[len(UPLOAD_URL_PREFIX):]
+            else:
+                base, rel = ROOT_DIR, rel_path
+            safe_path = os.path.normpath(os.path.join(base, rel))
+            base_n = os.path.normpath(base)
+            if safe_path != base_n and not safe_path.startswith(base_n + os.sep):
+                self.send_error(403, "Forbidden")
+                return
+            if os.path.isfile(safe_path):
+                self._serve_download(safe_path)
+            else:
+                self.send_error(404, "File not found")
+            return
+
+        if path == '/api/software':
+            sw_list = build_software_list()
+            self._serve_json({"success": True, "data": sw_list})
+            return
+
+        if path == '/api/session':
+            s = self._get_session()
+            if s:
+                self._serve_json({"success": True, "username": s["username"], "role": s["role"]})
+            else:
+                self._serve_json({"success": False})
+            return
+
+        if path == '/api/users':
+            s = self._require_auth('admin')
+            if not s: return
+            users = load_users()
+            safe_users = [{"username": u["username"], "role": u["role"], "created": u.get("created","")} for u in users.get("users",[])]
+            self._serve_json({"success": True, "users": safe_users})
+            return
+
+        if path == '/api/scan-status':
+            self._serve_json({"scanning": _scan_lock.locked(), "lastScan": _last_scan_time})
+            return
+
+        if path == '/api/fetch-status':
+            self._serve_json(dict(_fetch_status))
+            return
+
+        if path == '/api/config':
+            config = load_json(CONFIG_FILE, default_config())
+            self._serve_json(config)
+            return
+
+        super().do_GET()
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = urllib.parse.unquote(parsed.path)
+
+        if path == '/api/register':
+            self._handle_register()
+            return
+
+        if path == '/api/login':
+            self._handle_login()
+            return
+
+        if path == '/api/logout':
+            token = self.headers.get('X-Session', '')
+            destroy_session(token)
+            self._serve_json({"success": True})
+            return
+
+        if path == '/api/rescan':
+            s = self._require_auth('admin')
+            if not s: return
+            self._handle_rescan()
+            return
+
+        if path == '/api/admin/software':
+            s = self._require_auth('admin')
+            if not s: return
+            self._handle_admin_software()
+            return
+
+        if path == '/api/upload':
+            s = self._require_auth()
+            if not s: return
+            self._handle_upload()
+            return
+
+        if path == '/api/admin/fetch':
+            s = self._require_auth('admin')
+            if not s: return
+            self._handle_remote_fetch()
+            return
+
+        if path == '/api/users':
+            s = self._require_auth('admin')
+            if not s: return
+            self._handle_add_user()
+            return
+
+        self.send_error(404, "Not found")
+
+    def do_PUT(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = urllib.parse.unquote(parsed.path)
+        if path == '/api/admin/software':
+            s = self._require_auth('admin')
+            if not s: return
+            self._handle_admin_software()
+            return
+        self.send_error(404, "Not found")
+
+    def do_DELETE(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = urllib.parse.unquote(parsed.path)
+        if path.startswith('/api/admin/software/'):
+            s = self._require_auth('admin')
+            if not s: return
+            name = urllib.parse.unquote(path[len('/api/admin/software/'):])
+            self._handle_admin_delete(name)
+            return
+        if path.startswith('/api/users/'):
+            s = self._require_auth('admin')
+            if not s: return
+            name = urllib.parse.unquote(path[len('/api/users/'):])
+            if s["username"] == name:
+                self._serve_json({"success": False, "error": "不能删除自己"})
+                return
+            ok, msg = delete_user(name)
+            self._serve_json({"success": ok, "message": msg})
+            return
+        self.send_error(404, "Not found")
+
+    def _handle_register(self):
+        data = self._read_body()
+        username = data.get("username", "").strip()
+        password = data.get("password", "")
+        if not username or not password:
+            self._serve_json({"success": False, "error": "用户名和密码不能为空"})
+            return
+        if has_users():
+            self._serve_json({"success": False, "error": "已存在用户，请联系管理员"})
+            return
+        ok, msg = create_user(username, password, role="admin")
+        if ok:
+            token = create_session(username, "admin")
+            self._serve_json({"success": True, "session": token, "username": username, "role": "admin"})
+        else:
+            self._serve_json({"success": False, "error": msg})
+
+    def _handle_login(self):
+        data = self._read_body()
+        username = data.get("username", "").strip()
+        password = data.get("password", "")
+        ok, result = verify_user(username, password)
+        if ok:
+            token = create_session(username, result["role"])
+            self._serve_json({"success": True, "session": token, "username": username, "role": result["role"]})
+        else:
+            self._serve_json({"success": False, "error": result})
+
+    def _handle_add_user(self):
+        data = self._read_body()
+        username = data.get("username", "").strip()
+        password = data.get("password", "")
+        role = data.get("role", "user")
+        if role not in ("admin", "user"):
+            role = "user"
+        if not username or not password:
+            self._serve_json({"success": False, "error": "用户名和密码不能为空"})
+            return
+        ok, msg = create_user(username, password, role)
+        self._serve_json({"success": ok, "message": msg})
+
+    def _handle_upload(self):
+        try:
+            ctype = self.headers.get('Content-Type', '')
+            if 'multipart/form-data' not in ctype:
+                self._serve_json({"success": False, "error": "需要文件上传"})
+                return
+            boundary = ctype.split('boundary=')[1].encode()
+            remaining = int(self.headers.get('Content-Length', 0))
+            if remaining > MAX_UPLOAD_SIZE:
+                self._serve_json({"success": False, "error": "文件太大"})
+                return
+            body_data = self.rfile.read(remaining)
+            parts = body_data.split(b'--' + boundary)
+            filename = None
+            file_data = None
+            for part in parts:
+                if b'Content-Disposition' in part and b'filename=' in part:
+                    disp_match = re.search(rb'filename="([^"]+)"', part)
+                    if disp_match:
+                        filename = disp_match.group(1).decode('utf-8', errors='replace')
+                    idx = part.find(b'\r\n\r\n')
+                    if idx >= 0:
+                        file_data = part[idx+4:]
+                        if file_data.endswith(b'\r\n'):
+                            file_data = file_data[:-2]
+            if not filename or file_data is None:
+                self._serve_json({"success": False, "error": "未找到文件"})
+                return
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            safe_name = os.path.basename(filename.replace("\\", "/"))
+            if not safe_name:
+                safe_name = "upload.bin"
+            base, ext = os.path.splitext(safe_name)
+            save_path = os.path.join(UPLOAD_DIR, safe_name)
+            i = 1
+            while os.path.exists(save_path):
+                save_path = os.path.join(UPLOAD_DIR, f"{base}({i}){ext}")
+                i += 1
+            with open(save_path, 'wb') as f:
+                f.write(file_data)
+            refresh_library_async()  # 让新文件立即出现在软件库
+            self._serve_json({"success": True, "message": "上传成功", "filename": os.path.basename(save_path)})
+        except Exception as e:
+            self._serve_json({"success": False, "error": str(e)})
+
+    def _serve_file(self, filepath, content_type):
+        try:
+            with open(filepath, 'rb') as f:
+                content = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(content)))
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(content)
+        except FileNotFoundError:
+            self.send_error(404, "File not found")
+
+    def _serve_download(self, filepath):
+        try:
+            filesize = os.path.getsize(filepath)
+            filename = os.path.basename(filepath)
+            quoted = urllib.parse.quote(filename)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/octet-stream')
+            self.send_header('Content-Length', str(filesize))
+            self.send_header('Content-Disposition', f"attachment; filename*=UTF-8''{quoted}")
+            self.end_headers()
+            with open(filepath, 'rb') as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except FileNotFoundError:
+            self.send_error(404, "File not found")
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def _serve_json(self, data):
+        content = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(content)))
+        self.send_header('Cache-Control', 'no-cache')
+        self.end_headers()
+        self.wfile.write(content)
+
+    def _read_body(self):
+        length = int(self.headers.get('Content-Length', 0))
+        if length == 0:
+            return {}
+        body = self.rfile.read(length)
+        return json.loads(body.decode('utf-8'))
+
+    def _handle_rescan(self):
+        if _scan_lock.locked():
+            self._serve_json({"success": False, "error": "扫描正在进行中"})
+            return
+        refresh_library_async()
+        scan_data = load_json(SCAN_FILE, {"totalFiles": 0})
+        self._serve_json({"success": True, "message": "扫描已启动", "totalFiles": scan_data.get("totalFiles", 0)})
+
+    def _handle_remote_fetch(self):
+        if _fetch_status.get("active"):
+            self._serve_json({"success": False, "error": "已有下载任务进行中"})
+            return
+        try:
+            data = self._read_body()
+            name = (data.get('name') or '').strip()
+            url = (data.get('url') or '').strip()
+            if not url:
+                self._serve_json({'success': False, 'error': '下载地址不能为空'})
+                return
+            if not re.match(r'^https?://', url, re.I):
+                self._serve_json({'success': False, 'error': '仅支持 HTTP/HTTPS 地址'})
+                return
+            threading.Thread(target=fetch_remote_file, args=(url, name or 'download'),
+                             daemon=True).start()
+            self._serve_json({'success': True, 'message': '下载已开始'})
+        except Exception as e:
+            self._serve_json({'success': False, 'error': str(e)})
+
+    def _handle_admin_software(self):
+        try:
+            data = self._read_body()
+            name = data.get("name")
+            if not name:
+                self._serve_json({"success": False, "error": "name is required"})
+                return
+            config = load_json(CONFIG_FILE, default_config())
+            if "software" not in config:
+                config["software"] = {}
+            if name not in config["software"]:
+                config["software"][name] = {}
+            sw_cfg = config["software"][name]
+            for key in ["category", "icon", "desc", "official", "showOfficial", "customOfficial", "downloadUrl"]:
+                if key in data:
+                    sw_cfg[key] = data[key]
+            save_json(CONFIG_FILE, config)
+            self._serve_json({"success": True, "message": "已更新"})
+        except Exception as e:
+            self._serve_json({"success": False, "error": str(e)})
+
+    def _handle_admin_delete(self, name):
+        config = load_json(CONFIG_FILE, default_config())
+        if name in config.get("software", {}):
+            del config["software"][name]
+            save_json(CONFIG_FILE, config)
+            self._serve_json({"success": True, "message": "已删除"})
+        else:
+            self._serve_json({"success": False, "error": "未找到"})
+
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Session')
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        log_msg = f"[{self.log_date_time_string()}] {format % args}"
+        try:
+            os.makedirs(LOG_DIR, exist_ok=True)
+            with open(os.path.join(LOG_DIR, "server.log"), "a", encoding="utf-8") as f:
+                f.write(log_msg + "\n")
+        except Exception:
+            pass
+
+# ============================================================
+# Main
+# ============================================================
 
 def run_server(port):
-    socketserver.TCPServer.allow_reuse_address=True
-    httpd=None
-    for p in range(port,port+20):
-        try:httpd=socketserver.ThreadingTCPServer(('',p),SoftwareHandler);port=p;break
-        except OSError:continue
-    if not httpd:raise RuntimeError('Cannot find available port')
-    print(f'\nSoftware Library v8 running at http://0.0.0.0:{port}\nRoot: {ROOT_DIR}\nData: {DATA_DIR}\n')
-    try:httpd.serve_forever()
-    finally:httpd.server_close()
+    socketserver.TCPServer.allow_reuse_address = True
+    httpd = None
+    for p in range(port, port + 20):
+        try:
+            httpd = socketserver.TCPServer(("", p), SoftwareHandler)
+            port = p
+            break
+        except OSError:
+            continue
+    if httpd is None:
+        print("ERROR: Cannot find available port!")
+        return
+    print(f"\n{'='*55}")
+    print(f"  Software Library Manager v6 Running")
+    print(f"  URL: http://0.0.0.0:{port}")
+    print(f"  Root: {ROOT_DIR}")
+    print(f"  Upload: {UPLOAD_DIR}")
+    print(f"  Data: {DATA_DIR}")
+    print(f"  Users: {'Registered' if has_users() else 'No users yet (will register on first visit)'}")
+    print(f"{'='*55}\n")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nServer stopped.")
+        httpd.shutdown()
 
 def watch_loop(interval):
     while True:
         time.sleep(interval)
-        try:run_scan()
-        except Exception as e:print('[scan]',e)
+        try:
+            refresh_library()
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Rescan error: {e}")
 
 def main():
     import argparse
-    parser=argparse.ArgumentParser();parser.add_argument('--scan-only',action='store_true');parser.add_argument('--no-scan',action='store_true');parser.add_argument('--port',type=int,default=PORT);parser.add_argument('--watch',action='store_true');a=parser.parse_args()
-    os.makedirs(DATA_DIR,exist_ok=True);os.makedirs(ROOT_DIR,exist_ok=True)
-    if not a.no_scan:run_scan()
-    if a.scan_only:return
-    if a.watch:threading.Thread(target=watch_loop,args=(WATCH_INTERVAL,),daemon=True).start()
-    run_server(a.port)
-if __name__=='__main__':main()
+    parser = argparse.ArgumentParser(description="Software Library Manager")
+    parser.add_argument("--scan-only", action="store_true")
+    parser.add_argument("--no-scan", action="store_true")
+    parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--watch", action="store_true")
+    args = parser.parse_args()
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    if not args.no_scan:
+        refresh_library()
+    else:
+        html = generate_html()
+        with open(HTML_FILE, 'w', encoding='utf-8') as f:
+            f.write(html)
+    if args.scan_only:
+        return
+    if args.watch:
+        t = threading.Thread(target=watch_loop, args=(WATCH_INTERVAL,), daemon=True)
+        t.start()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Auto-rescan enabled (every {WATCH_INTERVAL}s)")
+    run_server(args.port)
+
+if __name__ == "__main__":
+    main()
