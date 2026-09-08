@@ -60,7 +60,8 @@ SUPPORTED_EXTENSIONS = {
 
 SKIP_DIRS = {"logs", "log", "工作文件", "文档", ".workbuddy-ai", "$RECYCLE.BIN",
              "System Volume Information", "@Recycle", ".zsshare_trash", "docker",
-             "tmp", "temp", "cache", "__pycache__", "node_modules", "uploads"}
+             "tmp", "temp", "cache", "__pycache__", "node_modules", "uploads",
+             "software-library"}
 SKIP_FILES = {"README.md", "index.html", "software_library.json",
               "update_library.py", "app.py", "deploy.sh", "启动软件库.bat",
               "config.json", "scan_result.json", "users.json", "server.log"}
