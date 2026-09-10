@@ -4,7 +4,9 @@ LABEL maintainer="software-library"
 LABEL description="Software Library v8 - standalone searchable software mirror"
 
 WORKDIR /app
-COPY app.py /app/app.py
+COPY app.py catalog.py /app/
+COPY static /app/static
+COPY tests /app/tests
 
 ENV LIB_ROOT_DIR=/data \
     LIB_PORT=8899 \
@@ -14,6 +16,7 @@ ENV LIB_ROOT_DIR=/data \
 
 RUN pip install --no-cache-dir requests \
     && mkdir -p /app/data /data
+    && python -m unittest discover -s tests -v
 
 EXPOSE 8899
 

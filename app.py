@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Software Library Manager v6
+Software Library Manager v9
 ==========================
 Scans NAS directory for software files, provides a searchable web UI
 with user authentication, admin panel, file upload, remote URL fetch
@@ -14,10 +14,12 @@ Environment variables:
   LIB_UPLOAD_DIR     Upload / fetched files directory (default: <LIB_DATA_DIR>/uploads)
   LIB_WATCH_INTERVAL Auto-rescan interval in seconds (default: 3600)
 
-Only the Python standard library is required (no pip packages).
+Requires Python 3.10+ and requests.
 """
 
 import os
+import catalog
+from functools import wraps
 import re
 import json
 import time
@@ -413,10 +415,25 @@ def load_json(filepath, default):
     except (FileNotFoundError, json.JSONDecodeError):
         return default
 
+_config_lock = threading.RLock()
+
+def config_transaction(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with _config_lock:
+            return fn(*args, **kwargs)
+    return wrapped
+
 def save_json(filepath, data):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    temporary = filepath + "." + uuid.uuid4().hex + ".tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(temporary, filepath)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 def default_config():
     return {"software": {}, "order": [], "version": 1}
@@ -491,6 +508,17 @@ def build_software_list():
                 "downloadUrl": cfg.get("downloadUrl", ""),
             }
 
+    nodes = catalog.categories(config, list(grouped.values()))
+    node_map = {n["id"]: n for n in nodes}
+    legacy = {n["name"]: n["id"] for n in nodes if not n["parentId"]}
+    for sw in grouped.values():
+        cfg = overrides.get(sw["name"], {})
+        cid = cfg.get("categoryId", legacy.get(sw["category"], ""))
+        sw["categoryId"] = cid if cid in node_map else ""
+        sw["category"] = node_map[cid]["name"] if cid in node_map else "未分类"
+        for key, default in (("displayName", sw["name"]), ("notes", ""), ("tags", []), ("customFields", {})):
+            sw[key] = cfg.get(key, default)
+        sw["displayName"] = sw["displayName"] or sw["name"]
     sw_list = list(grouped.values())
     sw_list.sort(key=lambda s: s["name"].lower())
     # Sort versions by filename
@@ -794,7 +822,7 @@ let ALL_DATA=[];
 let currentView='home',currentSoftware=null,searchTerm='',currentCat='all';
 
 function svg(n,s){const v=ICONS[n]||ICONS['box'];return '<span style="width:'+(s||26)+'px;height:'+(s||26)+'px;display:inline-flex;align-items:center;justify-content:center">'+v+'</span>';}
-function esc(s){const d=document.createElement('div');d.textContent=s||'';return d.innerHTML;}
+function esc(s){const d=document.createElement('div');d.textContent=String(s??'');return d.innerHTML.replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
 function showToast(msg){let t=document.getElementById('toast');if(!t){t=document.createElement('div');t.id='toast';t.className='toast';document.body.appendChild(t);}t.textContent=msg;t.classList.add('show');clearTimeout(t._timer);t._timer=setTimeout(()=>t.classList.remove('show'),2500);}
 
@@ -907,14 +935,14 @@ function renderHome(c){
   const d=getFiltered();
   document.getElementById('statCount').textContent=d.reduce((a,s)=>a+s.versions.length,0);
   if(d.length===0){c.innerHTML='<div class="no-results">'+svg('search',40)+'<p style="margin-top:12px;">没有找到匹配的软件</p></div>';return;}
-  const grouped={};d.forEach(s=>{if(!grouped[s.category])grouped[s.category]=[];grouped[s.category].push(s);});
+  const grouped=Object.create(null);d.forEach(s=>{if(!grouped[s.categoryId])grouped[s.categoryId]=[];grouped[s.categoryId].push(s);});
   let h='';
   for(const cat of Object.keys(grouped).sort()){
     const items=grouped[cat];
-    h+='<div class="section"><div class="section-header">'+svg(CAT_ICONS[cat]||'box',18)+'<h2>'+esc(cat)+' ('+items.length+')</h2></div><div class="grid">';
+    h+='<div class="section"><div class="section-header">'+svg(CAT_ICONS[cat]||'box',18)+'<h2>'+esc(categoryPath(cat))+' ('+items.length+')</h2></div><div class="grid">';
     for(const sw of items){
       const vc=sw.versions.length;const latest=sw.versions[0]||{};
-      h+='<div class="card" onclick="goVersion(\\''+esc(sw.name).replace(/'/g,"\\\\'")+'\\')"><div class="card-top"><div class="card-icon">'+svg(sw.icon,20)+'</div><div class="card-info"><div class="card-title">'+esc(sw.name)+'</div><div class="card-desc">'+esc(sw.desc)+'</div></div></div><div class="card-meta"><span class="meta-tag type">'+(latest.fileType||'')+'</span><span class="meta-tag size">'+(latest.sizeText||'')+'</span>';
+      h+='<div class="card" onclick="goVersion(\\''+esc(sw.name).replace(/'/g,"\\\\'")+'\\')"><div class="card-top"><div class="card-icon">'+svg(sw.icon,20)+'</div><div class="card-info"><div class="card-title">'+esc(sw.displayName||sw.name)+'</div><div class="card-desc">'+esc(sw.desc)+'</div></div></div><div class="card-meta"><span class="meta-tag type">'+(latest.fileType||'')+'</span><span class="meta-tag size">'+(latest.sizeText||'')+'</span>';
       if(latest.date)h+='<span class="meta-tag date">'+latest.date+'</span>';
       h+='</div><div class="card-footer">';
       if(sw.showOfficial&&(sw.official||sw.customOfficial))h+='<span class="official-badge">'+svg('external',10)+' 官网</span>';
@@ -963,7 +991,7 @@ function renderAdminSoftwareRows(keyword){
   const q=(keyword||'').toLowerCase().trim(); let h='';
   for(const sw of ALL_DATA){
     if(q && !(sw.name+' '+sw.category+' '+sw.desc).toLowerCase().includes(q))continue;
-    const id=sw.name.replace(/[^a-zA-Z0-9]/g,'_');
+    const id=encodeURIComponent(sw.name);
     h+='<div class="edit-row admin-grid">';
     h+='<div><strong style="font-size:12px;color:var(--text-bright)">'+esc(sw.name)+'</strong><div style="font-size:10px;color:var(--text-dim)">'+esc(sw.category)+'</div></div>';
     h+='<input type="text" id="official_'+id+'" value="'+esc(sw.customOfficial||sw.official||'')+'" placeholder="官网地址">';
@@ -1006,7 +1034,7 @@ async function toggleOfficial(name){
   if(r.success){sw.showOfficial=newVal;const q=document.getElementById('adminSoftwareSearch')?.value||'';renderAdmin(document.getElementById('container'));setTimeout(()=>{const i=document.getElementById('adminSoftwareSearch');if(i){i.value=q;filterAdminSoftware(q);}},0);showToast(newVal?'已显示官网':'已隐藏官网');}else showToast(r.error||'操作失败');
 }
 async function saveOfficial(name){
-  const id=name.replace(/[^a-zA-Z0-9]/g,'_'); const official=document.getElementById('official_'+id)?.value.trim()||''; const download=document.getElementById('download_'+id)?.value.trim()||'';
+  const id=encodeURIComponent(name); const official=document.getElementById('official_'+id)?.value.trim()||''; const download=document.getElementById('download_'+id)?.value.trim()||'';
   if(official && !/^https?:\\/\\//i.test(official)){showToast('官网地址必须以 http:// 或 https:// 开头');return;}
   if(download && !/^https?:\\/\\//i.test(download)){showToast('下载地址必须以 http:// 或 https:// 开头');return;}
   const r=await api('/api/admin/software',{method:'PUT',body:{name:name,customOfficial:official,downloadUrl:download,showOfficial:!!official}});
@@ -1097,6 +1125,11 @@ init();
     js = js.replace("__CAT_ICONS_JSON__", cat_icons_json)
     js = js.replace("__HAS_USERS__", "true" if has_registered_users else "false")
 
+    asset_dir = os.path.join(os.path.dirname(__file__), "static")
+    with open(os.path.join(asset_dir, "catalog.js"), encoding="utf-8") as asset:
+        js = js.replace("init();", asset.read() + "\ninit();")
+    with open(os.path.join(asset_dir, "catalog.css"), encoding="utf-8") as asset:
+        css += "<style>" + asset.read() + "</style>"
     html = "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>软件库 | Software Library</title>\n" + css + "\n" + body + js
     return html
 
@@ -1157,8 +1190,11 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == '/api/software':
-            sw_list = build_software_list()
-            self._serve_json({"success": True, "data": sw_list})
+            with _config_lock:
+                sw_list = build_software_list()
+                config = load_json(CONFIG_FILE, default_config())
+                nodes = catalog.categories(config, sw_list)
+            self._serve_json({"success": True, "data": sw_list, "categories": nodes})
             return
 
         if path == '/api/session':
@@ -1195,6 +1231,11 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
+
+        if path == '/api/admin/catalog':
+            if not self._require_auth('admin'): return
+            self._handle_catalog()
+            return
 
         if path == '/api/register':
             self._handle_register()
@@ -1437,6 +1478,22 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self._serve_json({'success': False, 'error': str(e)})
 
+    @config_transaction
+    def _handle_catalog(self):
+        try:
+            data = self._read_body()
+            config = load_json(CONFIG_FILE, default_config())
+            software = build_software_list()
+            catalog.categories(config, software)
+            for sw in software:
+                config.setdefault("software", {}).setdefault(sw["name"], {})["categoryId"] = sw["categoryId"]
+            catalog.mutate(config, software, data)
+            save_json(CONFIG_FILE, config)
+            self._serve_json({"success": True})
+        except (ValueError, TypeError, KeyError) as exc:
+            self._serve_json({"success": False, "error": str(exc)})
+
+    @config_transaction
     def _handle_admin_software(self):
         try:
             data = self._read_body()
@@ -1458,6 +1515,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self._serve_json({"success": False, "error": str(e)})
 
+    @config_transaction
     def _handle_admin_delete(self, name):
         config = load_json(CONFIG_FILE, default_config())
         if name in config.get("software", {}):
@@ -1504,7 +1562,7 @@ def run_server(port):
         print("ERROR: Cannot find available port!")
         return
     print(f"\n{'='*55}")
-    print(f"  Software Library Manager v6 Running")
+    print(f"  Software Library Manager v9 Running")
     print(f"  URL: http://0.0.0.0:{port}")
     print(f"  Root: {ROOT_DIR}")
     print(f"  Upload: {UPLOAD_DIR}")
