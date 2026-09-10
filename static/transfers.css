@@ -11,3 +11,12 @@
 .catalog-actions .btn,.catalog-software-row>.btn{padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-card,#fff);font:inherit;font-size:12px;cursor:pointer}
 .catalog-actions .btn-download{background:var(--accent);color:white}.catalog-actions .btn:hover{filter:brightness(.96)}
 .catalog-field[hidden]{display:none}.catalog-software-row{flex-wrap:wrap}.catalog-software-row>div{min-width:120px}
+
+/* Keep primary actions legible after the generic toolbar button rules. */
+.catalog-actions .btn.btn-primary{background:var(--accent,#5267ff);color:#fff;border-color:var(--accent,#5267ff);display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;min-width:84px}
+.catalog-actions .btn.btn-primary:disabled{opacity:.65;cursor:wait}
+.catalog-modal>.catalog-actions:last-child{position:sticky;bottom:0;background:var(--bg-card,#fff);padding:12px 0;margin-bottom:0;z-index:1;border-top:1px solid var(--border)}
+
+.edit-row.admin-grid input{min-width:0;max-width:100%;box-sizing:border-box}
+@media(max-width:1100px){.edit-row.admin-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.admin-grid .admin-actions{grid-column:1/-1}}
+@media(max-width:760px){.edit-row.admin-grid{grid-template-columns:minmax(0,1fr)}.admin-grid .admin-actions{grid-column:auto}.admin-actions .btn{white-space:nowrap}}

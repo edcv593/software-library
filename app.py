@@ -596,7 +596,7 @@ def enqueue_update(name):
         config=load_json(CONFIG_FILE,default_config())
         sw=config.get('software',{}).get(name,{})
         source=updates.settings(sw.get('updateSource',{}))
-        url=source['url'] if source['kind']=='direct' else 'https://api.github.com/repos/'+source['repo']+'/releases/latest'
+        url=updates.source_url(source)
         if (source['kind']=='direct' and not source['url']) or (source['kind']=='github' and not source['repo']):
             raise ValueError('请先保存有效的更新源')
         queue=get_download_queue()

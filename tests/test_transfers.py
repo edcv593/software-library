@@ -141,6 +141,16 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(RemoteFixture.calls,[])
         self.assertEqual(self.completed[0][0],'saved.exe')
 
+    def test_retry_resolves_original_page_again(self):
+        source='https://adl.netease.com/d/g/uuremote/c/gw?type=pc'
+        task=self.queue.enqueue(source)
+        with patch('transfers.updates.prepare_download',return_value={'url':self.url+'/fail.exe'}) as resolver:
+            self.queue.start();self.wait_status(task,'failed')
+            resolver.assert_called_with(source)
+        with patch('transfers.updates.prepare_download',return_value={'url':self.url+'/latest.exe'}) as resolver:
+            self.queue.action(task['id'],'retry');self.wait_status(task,'completed')
+            resolver.assert_called_with(source)
+
     def test_sync_duplicate_hash_and_integrity_mismatch(self):
         task=self.queue.enqueue(self.url+'/first.exe');self.queue.start()
         done=self.wait_status(task,'completed')

@@ -118,6 +118,9 @@ function input(value,limit=200) { const node = el('input'); node.value = value |
 function actions(form,save,label='保存') {
   const row = el('div',undefined,'catalog-actions');
   const submit = button(label,()=>{}); submit.type='submit'; submit.classList.add('btn-primary');
+  submit.setAttribute('aria-label',label);
+  const icon=el('span');icon.setAttribute('aria-hidden','true');icon.innerHTML=svg('save',16);
+  submit.replaceChildren(icon,el('span',label));
   row.append(button('取消',closeModal),submit); form.append(row);
   form.onsubmit = async e => { e.preventDefault(); submit.disabled=true; try { await save(); } finally { submit.disabled=false; } };
 }

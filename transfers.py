@@ -217,11 +217,11 @@ class DownloadQueue:
         if filename:
             filename = safe_filename(filename, self.extensions)
         with self.lock:
-            if any(t['url'] == url and t['software'] == software and t['status'] in ('queued','downloading','cancelling','indexing') for t in self.tasks):
+            if any(t.get('sourceUrl',t['url']) == url and t['software'] == software and t['status'] in ('queued','downloading','cancelling','indexing') for t in self.tasks):
                 raise ValueError('该下载任务已在队列中')
             if sum(t['status'] in ('queued','downloading','cancelling','indexing') for t in self.tasks) >= 100:
                 raise ValueError('队列最多容纳 100 个未完成任务')
-            task = dict(id=uuid.uuid4().hex, url=url, software=software, filename=filename,
+            task = dict(id=uuid.uuid4().hex, url=url, sourceUrl=url, software=software, filename=filename,
                         status='queued', bytes=0, total=0, speed=0, attempts=0,
                         error='', created=time.time(), updated=time.time())
             if context:
@@ -274,10 +274,13 @@ class DownloadQueue:
             start = last = time.monotonic()
             if task.get('source'):
                 self._update(task, **updates.resolve(task['source']))
+            else:
+                self._update(task,url=task.get('sourceUrl',task['url']))
+            self._update(task, **updates.prepare_download(task['url']))
             req = urllib.request.Request(task['url'], headers={'User-Agent':'SoftwareLibrary/10', 'Accept-Encoding':'identity'})
             with urllib.request.urlopen(req, timeout=20) as response:
                 if response.headers.get_content_type() in ('text/html','application/json'):
-                    raise ValueError('下载地址返回的是网页或接口内容，请填写安装包直链')
+                    raise ValueError('下载地址返回网页或接口内容；已支持 UU 远程与飞牛官方下载页，其他网站需安装包直链或专用适配')
                 total = int(response.headers.get('Content-Length') or 0)
                 if total > self.limit:
                     raise ValueError('远程文件超过下载大小限制')

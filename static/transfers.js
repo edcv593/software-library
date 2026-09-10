@@ -13,12 +13,12 @@ function editOfficialSettings(sw) {
   const visible=el('input');visible.type='checkbox';visible.checked=!!sw.showOfficial;field(form,'在软件详情显示官网入口',visible);
   form.append(el('h3','同步最新版'),el('p','下载校验成功后，新版设为推荐，旧版转入历史版本。普通官网首页不能作为安装包直链。'));
   const source=sw.updateSource||{};
-  const kind=el('select');kind.add(new Option('始终指向最新版的下载直链','direct'));kind.add(new Option('GitHub Releases 最新稳定版','github'));kind.value=source.kind||'direct';field(form,'更新源类型',kind);
+  const kind=el('select');kind.add(new Option('始终指向最新版的下载直链','direct'));kind.add(new Option('GitHub Releases 最新稳定版','github'));kind.add(new Option('UU 远程 Windows 官方最新版','uu'));kind.add(new Option('飞牛 fnOS x86 官方最新版','fnos'));kind.value=source.kind||'direct';field(form,'更新源类型',kind);
   const url=field(form,'最新版下载直链',input(source.url||sw.downloadUrl,4096));url.type='url';
   const filename=field(form,'直链保存文件名（可选）',input(source.filename,200));filename.placeholder='例如 software.exe';
   const repo=field(form,'GitHub 仓库',input(source.repo));repo.placeholder='例如 owner/repo';
   const pattern=field(form,'发布文件匹配规则',input(source.assetPattern));pattern.placeholder='例如 *windows*x64*.exe（必须只匹配一个文件）';
-  function toggle(){url.parentElement.hidden=filename.parentElement.hidden=kind.value!=='direct';repo.parentElement.hidden=pattern.parentElement.hidden=kind.value!=='github';}kind.onchange=toggle;toggle();
+  function toggle(){for(const node of [url,filename])node.disabled=node.parentElement.hidden=kind.value!=='direct';for(const node of [repo,pattern])node.disabled=node.parentElement.hidden=kind.value!=='github';}kind.onchange=toggle;toggle();
   const auto=el('input');auto.type='checkbox';auto.checked=!!source.auto;field(form,'自动检查并下载更新',auto);
   const hours=field(form,'检查间隔（小时）',input(String(source.intervalHours||24)));hours.type='number';hours.min='1';hours.max='720';hours.required=true;
   if(sw.lastUpdateCheck)form.append(el('p','上次检查：'+new Date(sw.lastUpdateCheck*1000).toLocaleString()));
@@ -157,7 +157,8 @@ function drawQueue() {
     if(['queued','downloading'].includes(task.status))head.append(button('取消',action('cancel')));
     if(['failed','cancelled'].includes(task.status))head.append(button('重试',action('retry')));
     if(['failed','cancelled','completed'].includes(task.status))head.append(button('移除记录',action('remove')));
-    row.append(head,el('p',task.url,'queue-url'));
+    row.append(head,el('p',task.sourceUrl||task.url,'queue-url'));
+    if(task.provider)row.append(el('p',task.provider==='uu'?'已解析 UU 官方下载跳转':'已获取飞牛官方下载签名'));
     if(task.sync)row.append(el('p',task.unchanged?'官网同步：文件内容未变化':'官网同步：成功后替换为推荐版本'));
     const progress=el('progress');progress.max=task.total||1;
     if(task.total)progress.value=Math.min(task.bytes,task.total);else if(task.status!=='downloading')progress.value=task.status==='completed'?1:0;
