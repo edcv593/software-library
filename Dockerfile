@@ -1,10 +1,10 @@
 FROM python:3.12-slim
 
 LABEL maintainer="software-library"
-LABEL description="Software Library v9 - standalone searchable software mirror"
+LABEL description="Software Library v10 - standalone searchable software mirror"
 
 WORKDIR /app
-COPY app.py catalog.py /app/
+COPY app.py catalog.py versions.py transfers.py updates.py /app/
 COPY static /app/static
 COPY tests /app/tests
 

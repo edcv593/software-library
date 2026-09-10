@@ -41,6 +41,7 @@ loadData = async function() {
   const d = await api('/api/software');
   if (!d.success) throw new Error(d.error || '加载失败');
   ALL_DATA = d.data; CATEGORIES = d.categories || [];
+  if(typeof updateTransferLimits === "function") updateTransferLimits(d.limits);
   if (currentCat !== 'all' && currentCat !== '' && !CATEGORIES.some(n => n.id === currentCat)) currentCat = 'all';
 };
 getFiltered = function() {
@@ -191,7 +192,7 @@ function renderCatalogManager(container) {
       check.setAttribute('aria-label','选择 '+sw.displayName);
       check.onchange=()=>{check.checked?selectedSoftware.add(sw.name):selectedSoftware.delete(sw.name);status.textContent='已选 '+selectedSoftware.size+' 项';};
       const label=el('div'); label.append(el('strong',sw.displayName),el('small',categoryPath(sw.categoryId)));
-      row.append(check,label,button('编辑资料',()=>editMetadata(sw))); rows.append(row);
+      row.append(check,label,button('编辑资料',()=>editMetadata(sw)),button('官网与更新设置',()=>editOfficialSettings(sw))); rows.append(row);
     });
     if(!visible.length) rows.append(el('p','没有匹配的软件'));
   }
@@ -207,6 +208,13 @@ render = function() {
   originalRender(); renderTree();
   const categoryCount=document.querySelectorAll('.stats .num')[1];
   if(categoryCount) categoryCount.textContent=CATEGORIES.length;
+  const totalFiles=ALL_DATA.reduce((n,s)=>n+s.versions.length,0);
+  const totalBytes=ALL_DATA.reduce((n,s)=>n+s.versions.reduce((a,v)=>a+v.size,0),0);
+  if(typeof bytes==='function') {
+    document.querySelectorAll('.stats .num')[2].textContent=bytes(totalBytes);
+    document.querySelector('.footer p').textContent='软件库 · 共 '+totalFiles+' 个文件 · 总计 '+bytes(totalBytes);
+  }
+  if(currentView!=='home') document.getElementById('statCount').textContent=totalFiles;
   const container=document.getElementById('container');
   if(currentView==='home') {
     // Keep identity and display names separate, and avoid inline handlers for file names.

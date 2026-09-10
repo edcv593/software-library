@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Software Library Manager v9
+Software Library Manager v10
 ==========================
 Scans NAS directory for software files, provides a searchable web UI
 with user authentication, admin panel, file upload, remote URL fetch
@@ -19,6 +19,9 @@ Requires Python 3.10+ and requests.
 
 import os
 import catalog
+import transfers
+import versions
+import updates
 from functools import wraps
 import re
 import json
@@ -68,8 +71,8 @@ SKIP_FILES = {"README.md", "index.html", "software_library.json",
               "update_library.py", "app.py", "deploy.sh", "启动软件库.bat",
               "config.json", "scan_result.json", "users.json", "server.log"}
 
-MAX_UPLOAD_SIZE = 500 * 1024 * 1024  # 500MB
-MAX_DOWNLOAD_SIZE = 2 * 1024 * 1024 * 1024  # 2GB
+MAX_UPLOAD_SIZE = int(os.environ.get("LIB_MAX_UPLOAD_MB", "2048")) * 1024 * 1024
+MAX_DOWNLOAD_SIZE = int(os.environ.get("LIB_MAX_DOWNLOAD_MB", "8192")) * 1024 * 1024
 
 # ============================================================
 # Software knowledge base
@@ -351,7 +354,8 @@ def _scan_tree(base_dir, items, seen_paths, url_prefix=""):
     exts = set(SUPPORTED_EXTENSIONS.keys())
     compound_exts = [".tar.gz", ".tar.xz"]
     for dirpath, dirnames, filenames in os.walk(base_dir):
-        dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")]
+        dirnames[:] = [d for d in dirnames if d.lower() not in SKIP_DIRS and not d.startswith(".")
+                        and (url_prefix or os.path.realpath(os.path.join(dirpath,d)) != os.path.realpath(UPLOAD_DIR))]
         for filename in filenames:
             if filename.lower() in SKIP_FILES:
                 continue
@@ -392,15 +396,10 @@ def scan_directory():
     """Scan ROOT_DIR plus UPLOAD_DIR (uploads live outside the read-only share)."""
     items = []
     seen_paths = set()
-    _scan_tree(ROOT_DIR, items, seen_paths)
+    if os.path.realpath(ROOT_DIR) != os.path.realpath(UPLOAD_DIR):
+        _scan_tree(ROOT_DIR, items, seen_paths)
     if os.path.isdir(UPLOAD_DIR):
-        try:
-            real_upload = os.path.realpath(UPLOAD_DIR)
-            real_root = os.path.realpath(ROOT_DIR)
-            if not real_upload.startswith(real_root + os.sep) and real_upload != real_root:
-                _scan_tree(UPLOAD_DIR, items, seen_paths, UPLOAD_URL_PREFIX)
-        except Exception:
-            pass
+        _scan_tree(UPLOAD_DIR, items, seen_paths, UPLOAD_URL_PREFIX)
     items.sort(key=lambda x: (x["category"], x["name"].lower(), x["filename"].lower()))
     return items
 
@@ -423,6 +422,8 @@ def config_transaction(fn):
         with _config_lock:
             return fn(*args, **kwargs)
     return wrapped
+
+delete_user = config_transaction(delete_user)
 
 def save_json(filepath, data):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -460,16 +461,20 @@ def build_software_list():
     scan_items = scan_data.get("items", [])
     overrides = config.get("software", {})
 
+    identities = {i['name']:i for i in scan_items
+                  if config.get('versions',{}).get(i['path'],{}).get('software',i['name'])==i['name']}
     grouped = {}
     for item in scan_items:
-        name = item["name"]
+        version_cfg = config.get("versions", {}).get(item["path"], {})
+        name = version_cfg.get("software", item["name"])
         if name not in grouped:
+            identity = identities.get(name, item)
             grouped[name] = {
                 "name": name,
-                "category": item["category"],
-                "icon": item["icon"],
-                "desc": item["desc"],
-                "official": item["official"],
+                "category": identity["category"],
+                "icon": identity["icon"],
+                "desc": identity["desc"],
+                "official": identity["official"],
                 "versions": [],
                 "showOfficial": False,
                 "customOfficial": "",
@@ -484,9 +489,19 @@ def build_software_list():
             "path": item["path"],
             "displayName": item["filename"],  # 版本名直接显示完整文件名
             "downloadUrl": "",  # 每个版本可单独设置下载地址
+            "version": version_cfg.get("version", ""),
+            "platform": version_cfg.get("platform", ""),
+            "arch": version_cfg.get("arch", ""),
+            "channel": version_cfg.get("channel", "stable"),
+            "notes": version_cfg.get("notes", ""),
+            "recommended": version_cfg.get("recommended", False),
+            "sha256": version_cfg.get("sha256", ""),
         })
 
+    original_names = {item["name"] for item in scan_items}
     for sw_name, cfg in overrides.items():
+        if sw_name in original_names and sw_name not in grouped:
+            continue  # all source files were moved to another logical software
         if sw_name in grouped:
             if "category" in cfg: grouped[sw_name]["category"] = cfg["category"]
             if "icon" in cfg: grouped[sw_name]["icon"] = cfg["icon"]
@@ -519,79 +534,106 @@ def build_software_list():
         for key, default in (("displayName", sw["name"]), ("notes", ""), ("tags", []), ("customFields", {})):
             sw[key] = cfg.get(key, default)
         sw["displayName"] = sw["displayName"] or sw["name"]
+        sw["updateSource"] = cfg.get("updateSource", {})
+        sw["lastUpdateCheck"] = cfg.get("lastUpdateCheck", 0)
+        sw["lastUpdateError"] = cfg.get("lastUpdateError", "")
     sw_list = list(grouped.values())
     sw_list.sort(key=lambda s: s["name"].lower())
     # Sort versions by filename
     for sw in sw_list:
-        sw["versions"].sort(key=lambda v: v.get("filename",""), reverse=True)
+        sw["versions"].sort(key=lambda v: (v.get("recommended", False), v.get("filename","")), reverse=True)
     return sw_list
 
 # ============================================================
 # Remote URL fetch (download-to-library, background thread)
 # ============================================================
 
-_fetch_lock = threading.Lock()
-_fetch_status = {"active": False, "message": ""}
+_queue = None
+_queue_init_lock = threading.Lock()
 
 
-def _fetch_filename(resp, url, fallback):
-    name = ""
-    cd = resp.headers.get("Content-Disposition") or ""
-    m = re.search(r"filename\*\s*=\s*UTF-8''([^;]+)", cd, re.I) or \
-        re.search(r'filename\s*=\s*"?([^";]+)"?', cd, re.I)
-    if m:
+def index_transfer(filename, software, sha256, task=None):
+    global _last_scan_time
+    path = UPLOAD_URL_PREFIX + filename
+    with _scan_lock:
+        run_scan()
+        with _config_lock:
+            config = load_json(CONFIG_FILE, default_config())
+            cfg = config.setdefault("versions", {}).setdefault(path, {})
+            cfg["sha256"] = sha256
+            if task and task.get('sync'):
+                current=next((sw for sw in build_software_list() if sw['name']==software),None)
+                for version in (current or {}).get('versions',[]):
+                    if version['path'] != path:
+                        config['versions'].setdefault(version['path'],{}).update(recommended=False,channel='archive')
+                cfg.update(recommended=True,channel='stable')
+                if task.get('releaseVersion'):
+                    cfg['version']=task['releaseVersion']
+                    cfg['notes']=task.get('releaseNotes','')
+                config.setdefault('software',{}).setdefault(software,{}).update(
+                    lastUpdateSha=sha256,lastUpdateFile=filename,lastUpdateError='')
+            if software:
+                cfg["software"] = software
+            save_json(CONFIG_FILE, config)
+        html = generate_html()
+        with open(HTML_FILE, 'w', encoding='utf-8') as output:
+            output.write(html)
+        _last_scan_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+
+def get_download_queue():
+    global _queue
+    with _queue_init_lock:
+        if _queue is None:
+            _queue = transfers.DownloadQueue(DATA_DIR, UPLOAD_DIR, MAX_DOWNLOAD_SIZE,
+                                             SUPPORTED_EXTENSIONS, index_transfer)
+            _queue.start()
+        return _queue
+
+
+def enqueue_update(name):
+    with _config_lock:
+        config=load_json(CONFIG_FILE,default_config())
+        sw=config.get('software',{}).get(name,{})
+        source=updates.settings(sw.get('updateSource',{}))
+        url=source['url'] if source['kind']=='direct' else 'https://api.github.com/repos/'+source['repo']+'/releases/latest'
+        if (source['kind']=='direct' and not source['url']) or (source['kind']=='github' and not source['repo']):
+            raise ValueError('请先保存有效的更新源')
+        queue=get_download_queue()
+        if any(t['software']==name and t['status'] in ('queued','downloading','cancelling','indexing') for t in queue.snapshot()):
+            raise ValueError('该软件已有未完成的下载任务')
+        task=queue.enqueue(url,name,source.get('filename',''),context={
+            'sync':True,'source':source,'previousSha':sw.get('lastUpdateSha',''),
+            'previousFile':sw.get('lastUpdateFile','')})
+        config.setdefault('software',{}).setdefault(name,{}).update(lastUpdateCheck=time.time(),lastUpdateError='')
+        save_json(CONFIG_FILE,config)
+        return task
+
+
+def check_updates_once():
+    config=load_json(CONFIG_FILE,default_config())
+    for name,sw in config.get('software',{}).items():
+        source=sw.get('updateSource',{})
+        if source.get('auto') and time.time()-sw.get('lastUpdateCheck',0)>=source.get('intervalHours',24)*3600:
+            try:
+                enqueue_update(name)
+            except Exception as exc:
+                with _config_lock:
+                    latest=load_json(CONFIG_FILE,default_config())
+                    latest.setdefault('software',{}).setdefault(name,{}).update(lastUpdateCheck=time.time(),lastUpdateError=str(exc))
+                    save_json(CONFIG_FILE,latest)
+
+
+def update_watch_loop():
+    while True:
         try:
-            name = urllib.parse.unquote(m.group(1).strip().strip('"').strip("'"))
-        except Exception:
-            name = m.group(1).strip().strip('"').strip("'")
-    if not name:
-        name = os.path.basename(urllib.parse.urlparse(url).path)
-    name = os.path.basename(name.replace("\\", "/"))
-    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name).strip()
-    return name or (fallback + ".download")
+            check_updates_once()
+        except Exception as exc:
+            print(f"Update check error: {exc}")
+        time.sleep(60)
 
 
-def fetch_remote_file(url, fallback_name):
-    """Download a remote file into UPLOAD_DIR in the background, then refresh."""
-    global _fetch_status
-    with _fetch_lock:
-        _fetch_status = {"active": True, "message": "正在连接..."}
-        try:
-            req = urllib.request.Request(url, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; software-library/6.0)"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                total = int(resp.headers.get("Content-Length") or 0)
-                if total and total > MAX_DOWNLOAD_SIZE:
-                    raise Exception("远程文件超过 2GB 限制")
-                filename = _fetch_filename(resp, url, fallback_name)
-                os.makedirs(UPLOAD_DIR, exist_ok=True)
-                base, ext = os.path.splitext(filename)
-                save_path = os.path.join(UPLOAD_DIR, filename)
-                if os.path.exists(save_path):
-                    save_path = os.path.join(UPLOAD_DIR, f"{base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}")
-                done = 0
-                with open(save_path, "wb") as f:
-                    while True:
-                        chunk = resp.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        done += len(chunk)
-                        if done > MAX_DOWNLOAD_SIZE:
-                            raise Exception("远程文件超过 2GB 限制")
-                        f.write(chunk)
-                        if total:
-                            _fetch_status["message"] = f"下载中 {done * 100 // total}% ({format_size(done)})"
-                        else:
-                            _fetch_status["message"] = f"下载中 ({format_size(done)})"
-            saved = os.path.basename(save_path)
-            _fetch_status["message"] = f"已下载 {saved}，正在更新软件库..."
-            refresh_library()
-            _fetch_status = {"active": False, "message": f"完成: {saved} 已入库"}
-        except Exception as e:
-            _fetch_status = {"active": False, "message": f"失败: {e}"}
-
-
-def refresh_library():
+def refresh_library(strict=False):
     """Rescan + regenerate index.html (blocking; uses _scan_lock)."""
     global _last_scan_time
     with _scan_lock:
@@ -603,6 +645,8 @@ def refresh_library():
             _last_scan_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         except Exception as e:
             print(f"Refresh error: {e}")
+            if strict:
+                raise
 
 
 def refresh_library_async():
@@ -1127,8 +1171,12 @@ init();
 
     asset_dir = os.path.join(os.path.dirname(__file__), "static")
     with open(os.path.join(asset_dir, "catalog.js"), encoding="utf-8") as asset:
-        js = js.replace("init();", asset.read() + "\ninit();")
+        js = js.replace("init();", asset.read() + "\n__TRANSFERS_JS__\ninit();")
     with open(os.path.join(asset_dir, "catalog.css"), encoding="utf-8") as asset:
+        css += "<style>" + asset.read() + "</style>"
+    with open(os.path.join(asset_dir, "transfers.js"), encoding="utf-8") as asset:
+        js = js.replace("__TRANSFERS_JS__", asset.read())
+    with open(os.path.join(asset_dir, "transfers.css"), encoding="utf-8") as asset:
         css += "<style>" + asset.read() + "</style>"
     html = "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>软件库 | Software Library</title>\n" + css + "\n" + body + js
     return html
@@ -1194,7 +1242,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
                 sw_list = build_software_list()
                 config = load_json(CONFIG_FILE, default_config())
                 nodes = catalog.categories(config, sw_list)
-            self._serve_json({"success": True, "data": sw_list, "categories": nodes})
+            self._serve_json({"success": True, "data": sw_list, "categories": nodes, "limits": {"upload": MAX_UPLOAD_SIZE, "download": MAX_DOWNLOAD_SIZE, "extensions": list(SUPPORTED_EXTENSIONS)}})
             return
 
         if path == '/api/session':
@@ -1217,8 +1265,11 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             self._serve_json({"scanning": _scan_lock.locked(), "lastScan": _last_scan_time})
             return
 
-        if path == '/api/fetch-status':
-            self._serve_json(dict(_fetch_status))
+        if path in ('/api/fetch-status', '/api/admin/downloads'):
+            if not self._require_auth('admin'): return
+            tasks = get_download_queue().snapshot()
+            self._serve_json({"success": True, "tasks": tasks,
+                              "active": any(t['status'] in ('queued','downloading','cancelling','indexing') for t in tasks)})
             return
 
         if path == '/api/config':
@@ -1231,6 +1282,28 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
+
+        if path == '/api/admin/update':
+            if not self._require_auth('admin'): return
+            try:
+                data=self._read_body()
+                name=catalog.text(data.get('name'), '软件名称')
+                if name not in {sw['name'] for sw in build_software_list()}:
+                    raise ValueError('软件不存在')
+                self._serve_json({'success':True,'task':enqueue_update(name)})
+            except (ValueError,TypeError) as exc:
+                self._serve_json({'success':False,'error':str(exc)})
+            return
+
+        if path == '/api/admin/versions':
+            if not self._require_auth('admin'): return
+            self._handle_versions()
+            return
+
+        if path == '/api/admin/downloads':
+            if not self._require_auth('admin'): return
+            self._handle_download_action()
+            return
 
         if path == '/api/admin/catalog':
             if not self._require_auth('admin'): return
@@ -1314,6 +1387,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             return
         self.send_error(404, "Not found")
 
+    @config_transaction
     def _handle_register(self):
         data = self._read_body()
         username = data.get("username", "").strip()
@@ -1342,6 +1416,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self._serve_json({"success": False, "error": result})
 
+    @config_transaction
     def _handle_add_user(self):
         data = self._read_body()
         username = data.get("username", "").strip()
@@ -1357,48 +1432,25 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
 
     def _handle_upload(self):
         try:
-            ctype = self.headers.get('Content-Type', '')
-            if 'multipart/form-data' not in ctype:
-                self._serve_json({"success": False, "error": "需要文件上传"})
-                return
-            boundary = ctype.split('boundary=')[1].encode()
-            remaining = int(self.headers.get('Content-Length', 0))
-            if remaining > MAX_UPLOAD_SIZE:
-                self._serve_json({"success": False, "error": "文件太大"})
-                return
-            body_data = self.rfile.read(remaining)
-            parts = body_data.split(b'--' + boundary)
-            filename = None
-            file_data = None
-            for part in parts:
-                if b'Content-Disposition' in part and b'filename=' in part:
-                    disp_match = re.search(rb'filename="([^"]+)"', part)
-                    if disp_match:
-                        filename = disp_match.group(1).decode('utf-8', errors='replace')
-                    idx = part.find(b'\r\n\r\n')
-                    if idx >= 0:
-                        file_data = part[idx+4:]
-                        if file_data.endswith(b'\r\n'):
-                            file_data = file_data[:-2]
-            if not filename or file_data is None:
-                self._serve_json({"success": False, "error": "未找到文件"})
-                return
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
-            safe_name = os.path.basename(filename.replace("\\", "/"))
-            if not safe_name:
-                safe_name = "upload.bin"
-            base, ext = os.path.splitext(safe_name)
-            save_path = os.path.join(UPLOAD_DIR, safe_name)
-            i = 1
-            while os.path.exists(save_path):
-                save_path = os.path.join(UPLOAD_DIR, f"{base}({i}){ext}")
-                i += 1
-            with open(save_path, 'wb') as f:
-                f.write(file_data)
-            refresh_library_async()  # 让新文件立即出现在软件库
-            self._serve_json({"success": True, "message": "上传成功", "filename": os.path.basename(save_path)})
-        except Exception as e:
-            self._serve_json({"success": False, "error": str(e)})
+            software = urllib.parse.unquote(self.headers.get('X-Software', ''))
+            if software:
+                session = self._get_session()
+                if not session or session.get('role') != 'admin':
+                    raise ValueError('只有管理员可以指定上传文件的所属软件')
+                if software not in {sw['name'] for sw in build_software_list()}:
+                    raise ValueError('目标软件不存在')
+            self.connection.settimeout(120)
+            result = transfers.receive_upload(self.rfile, self.headers, UPLOAD_DIR,
+                                              MAX_UPLOAD_SIZE, SUPPORTED_EXTENSIONS)
+            try:
+                index_transfer(result['filename'], software, result['sha256'])
+                result['indexed'] = True
+            except Exception as exc:
+                result.update(indexed=False, warning='文件已保存，但入库失败，请重新扫描：' + str(exc))
+            self._serve_json(dict(success=True, message='上传成功', **result))
+        except (ValueError, OSError, UnicodeError) as exc:
+            self.close_connection = True
+            self._serve_json({'success': False, 'error': str(exc)})
 
     def _serve_file(self, filepath, content_type):
         try:
@@ -1459,24 +1511,34 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         self._serve_json({"success": True, "message": "扫描已启动", "totalFiles": scan_data.get("totalFiles", 0)})
 
     def _handle_remote_fetch(self):
-        if _fetch_status.get("active"):
-            self._serve_json({"success": False, "error": "已有下载任务进行中"})
-            return
         try:
             data = self._read_body()
-            name = (data.get('name') or '').strip()
-            url = (data.get('url') or '').strip()
-            if not url:
-                self._serve_json({'success': False, 'error': '下载地址不能为空'})
-                return
-            if not re.match(r'^https?://', url, re.I):
-                self._serve_json({'success': False, 'error': '仅支持 HTTP/HTTPS 地址'})
-                return
-            threading.Thread(target=fetch_remote_file, args=(url, name or 'download'),
-                             daemon=True).start()
-            self._serve_json({'success': True, 'message': '下载已开始'})
-        except Exception as e:
-            self._serve_json({'success': False, 'error': str(e)})
+            name = catalog.text(data.get('name', ''), '软件名称')
+            if name and name not in {sw['name'] for sw in build_software_list()}:
+                raise ValueError('目标软件不存在')
+            task = get_download_queue().enqueue(data.get('url'), name, data.get('filename', ''))
+            self._serve_json({'success': True, 'task': task, 'message': '已加入下载队列'})
+        except (ValueError, TypeError) as exc:
+            self._serve_json({'success': False, 'error': str(exc)})
+
+    def _handle_download_action(self):
+        try:
+            data = self._read_body()
+            get_download_queue().action(data.get('id'), data.get('action'))
+            self._serve_json({'success': True})
+        except (ValueError, TypeError) as exc:
+            self._serve_json({'success': False, 'error': str(exc)})
+
+    @config_transaction
+    def _handle_versions(self):
+        try:
+            config = load_json(CONFIG_FILE, default_config())
+            scan = load_json(SCAN_FILE, {'items': []})
+            versions.manage(config, scan['items'], self._read_body())
+            save_json(CONFIG_FILE, config)
+            self._serve_json({'success': True})
+        except (ValueError, TypeError) as exc:
+            self._serve_json({'success': False, 'error': str(exc)})
 
     @config_transaction
     def _handle_catalog(self):
@@ -1507,6 +1569,14 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             if name not in config["software"]:
                 config["software"][name] = {}
             sw_cfg = config["software"][name]
+            if "updateSource" in data:
+                sw_cfg["updateSource"] = updates.settings(data["updateSource"])
+            for field in ('official','customOfficial','downloadUrl'):
+                if field in data:
+                    value=catalog.text(data[field],field,4096)
+                    if value and urllib.parse.urlparse(value).scheme not in ('http','https'):
+                        raise ValueError('官网和下载地址必须以 HTTP/HTTPS 开头')
+                    data[field]=value
             for key in ["category", "icon", "desc", "official", "showOfficial", "customOfficial", "downloadUrl"]:
                 if key in data:
                     sw_cfg[key] = data[key]
@@ -1528,7 +1598,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Session')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-Session, X-Filename, X-Software')
         super().end_headers()
 
     def do_OPTIONS(self):
@@ -1553,7 +1623,7 @@ def run_server(port):
     httpd = None
     for p in range(port, port + 20):
         try:
-            httpd = socketserver.TCPServer(("", p), SoftwareHandler)
+            httpd = http.server.ThreadingHTTPServer(("", p), SoftwareHandler)
             port = p
             break
         except OSError:
@@ -1562,7 +1632,7 @@ def run_server(port):
         print("ERROR: Cannot find available port!")
         return
     print(f"\n{'='*55}")
-    print(f"  Software Library Manager v9 Running")
+    print(f"  Software Library Manager v10 Running")
     print(f"  URL: http://0.0.0.0:{port}")
     print(f"  Root: {ROOT_DIR}")
     print(f"  Upload: {UPLOAD_DIR}")
@@ -1570,6 +1640,8 @@ def run_server(port):
     print(f"  Users: {'Registered' if has_users() else 'No users yet (will register on first visit)'}")
     print(f"{'='*55}\n")
     try:
+        get_download_queue()
+        threading.Thread(target=update_watch_loop,daemon=True).start()
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nServer stopped.")

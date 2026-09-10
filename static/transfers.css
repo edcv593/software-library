@@ -1,0 +1,13 @@
+.version-managed,.queue-task{padding:14px 0;border-bottom:1px solid var(--border)}
+.version-managed p,.queue-task p{font-size:12px;color:var(--text-dim);margin:8px 0;overflow-wrap:anywhere}
+.version-managed strong{flex:1;overflow-wrap:anywhere}.version-managed code{display:block;overflow-wrap:anywhere;font-size:12px;margin:8px 0}.version-path{overflow-wrap:anywhere;font-size:13px}
+.download-form{max-width:760px;margin:16px 0}.download-form input,.download-form select{padding:10px;border:1px solid var(--border);border-radius:6px;width:100%}
+.queue-task progress,.upload-result progress{width:100%;height:12px;accent-color:var(--accent)}.queue-url{overflow-wrap:anywhere}.transfer-error{color:#b42318!important}.upload-result{margin:12px 0}.upload-result p{white-space:normal;overflow-wrap:anywhere}
+@media(max-width:760px){.version-managed .catalog-actions{align-items:flex-start}.version-managed .catalog-actions strong{flex-basis:70%}.download-form{width:100%}}
+
+.version-managed,.download-form,.queue-task{font-size:14px}
+#container>.admin-section h2{margin:12px 0;font-size:23px}
+#container>.admin-section>.catalog-actions>input:not([type=checkbox]),#container>.admin-section>.catalog-actions>select{padding:8px;border:1px solid var(--border);border-radius:6px;max-width:100%;min-width:0}
+.catalog-actions .btn,.catalog-software-row>.btn{padding:7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-card,#fff);font:inherit;font-size:12px;cursor:pointer}
+.catalog-actions .btn-download{background:var(--accent);color:white}.catalog-actions .btn:hover{filter:brightness(.96)}
+.catalog-field[hidden]{display:none}.catalog-software-row{flex-wrap:wrap}.catalog-software-row>div{min-width:120px}
