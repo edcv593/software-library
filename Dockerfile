@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 LABEL maintainer="software-library"
-LABEL description="Software Library v8 - standalone searchable software mirror"
+LABEL description="Software Library v9 - standalone searchable software mirror"
 
 WORKDIR /app
 COPY app.py catalog.py /app/
@@ -15,7 +15,7 @@ ENV LIB_ROOT_DIR=/data \
     PYTHONUNBUFFERED=1
 
 RUN pip install --no-cache-dir requests \
-    && mkdir -p /app/data /data
+    && mkdir -p /app/data /data \
     && python -m unittest discover -s tests -v
 
 EXPOSE 8899
