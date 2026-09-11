@@ -18,6 +18,10 @@ RUN pip install --no-cache-dir requests \
     && mkdir -p /app/data /data \
     && python -m unittest discover -s tests -v
 
+# Expose the two persistent directories to Docker/NAS container creation tools.
+# Bind /data read-only to the software library; bind /app/data read-write to app storage.
+VOLUME ["/data", "/app/data"]
+
 EXPOSE 8899
 
 HEALTHCHECK --interval=60s --timeout=10s --retries=3 \

@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   software-library:
     image: edcv593/software-library:latest
@@ -8,10 +6,19 @@ services:
     ports:
       - "8899:8899"
     volumes:
-      # 软件仓库目录（只读：上传、配置都不写这里，可放心维护）
-      - /tmp/zfsv3/nvme17/13040705017/data/共享数据:/data:ro
-      # 应用数据目录（与软件仓库分开）：用户、配置、上传与下载留存的文件都在这里
-      - /tmp/zfsv3/nvme17/13040705017/data/Docker/software-library:/app/data
+      # 必填：NAS 上已经存在的软件仓库文件夹，只读挂载。
+      - type: bind
+        source: "${SOFTWARE_DIR:?请在 .env 或部署环境中设置 SOFTWARE_DIR 为 NAS 软件目录的绝对路径}"
+        target: /data
+        read_only: true
+        bind:
+          create_host_path: false
+      # 必填：独立的应用数据文件夹，保存配置、账户、上传文件和下载队列。
+      - type: bind
+        source: "${APP_DATA_DIR:?请在 .env 或部署环境中设置 APP_DATA_DIR 为 NAS 应用数据目录的绝对路径}"
+        target: /app/data
+        bind:
+          create_host_path: false
     environment:
       - LIB_ROOT_DIR=/data
       - LIB_PORT=8899
