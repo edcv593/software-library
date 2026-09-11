@@ -32,6 +32,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.url = 'http://127.0.0.1:' + str(self.server.server_port)
+        app.create_user('test-admin', 'test-password', 'admin')
         self.token = app.create_session('test-admin', 'admin')
 
     def tearDown(self):
@@ -47,6 +48,52 @@ class CatalogIntegrationTests(unittest.TestCase):
             headers={'Content-Type': 'application/json', 'X-Session': token or self.token})
         with urllib.request.urlopen(req) as response:
             return json.load(response)
+
+    def fetch_status(self, path, token='', method='GET', body=None):
+        req = urllib.request.Request(self.url + path, method=method,
+            headers={'Cookie': 'session=' + token, 'Content-Type': 'application/json'},
+            data=None if body is None else json.dumps(body).encode())
+        try:
+            response = urllib.request.urlopen(req)
+        except urllib.error.HTTPError as exc:
+            response = exc
+        with response:
+            return response.status, response.read()
+
+    def test_download_access_and_revocation(self):
+        self.assertEqual(self.fetch_status('/download/windows.iso')[0], 401)
+        app.create_user('reader', 'secret')
+        token = app.create_session('reader', 'user')
+        self.assertEqual(self.fetch_status('/download/windows.iso', token), (200, b'windows test'))
+        status, body = self.fetch_status('/api/users/reader', self.token, 'PUT', {'canDownload': False})
+        self.assertTrue(json.loads(body)['success'])
+        self.assertEqual(self.fetch_status('/download/windows.iso', token)[0], 403)
+        self.fetch_status('/api/users/reader', self.token, 'PUT', {'canDownload': True})
+        self.assertEqual(self.fetch_status('/download/windows.iso', token)[0], 200)
+        app.delete_user('reader')
+        app.create_user('reader', 'new-password')
+        self.assertEqual(self.fetch_status('/download/windows.iso', token)[0], 401)
+
+    def test_download_bypass_and_concurrency(self):
+        Path(app.UPLOAD_DIR).mkdir(exist_ok=True)
+        (Path(app.UPLOAD_DIR) / 'private.exe').write_bytes(b'private')
+        for path in ('/users.json', '/uploads/private.exe', '/logs/', '/config.json'):
+            self.assertEqual(self.fetch_status(path)[0], 404)
+            self.assertEqual(self.fetch_status(path, method='HEAD')[0], 405)
+        self.assertEqual(self.fetch_status('/download/uploads/private.exe')[0], 401)
+        app._active_downloads['test-admin'] = 2
+        try:
+            self.assertEqual(self.fetch_status('/download/windows.iso', self.token)[0], 429)
+        finally:
+            app._active_downloads.clear()
+        self.assertEqual(self.fetch_status('/download/windows.iso', self.token)[0], 200)
+        self.assertEqual(self.fetch_status('/download/uploads/private.exe', self.token)[0], 200)
+
+    def test_reader_cannot_grant_download_permission(self):
+        app.create_user('reader', 'secret')
+        token = app.create_session('reader', 'user')
+        _, body = self.fetch_status('/api/users/reader', token, 'PUT', {'canDownload': True})
+        self.assertFalse(json.loads(body)['success'])
 
     def create(self, name, parent=''):
         self.assertTrue(self.request({'action':'create','name':name,'parentId':parent})['success'])
@@ -69,6 +116,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         paths = {key:getattr(app,key) for key in ('ROOT_DIR','DATA_DIR','UPLOAD_DIR','CONFIG_FILE','SCAN_FILE','USERS_FILE','HTML_FILE','LOG_DIR')}
         importlib.reload(app)
         for key,value in paths.items(): setattr(app,key,value)
+        app.create_user('test-admin', 'test-password', 'admin')
         self.token = app.create_session('test-admin','admin')
         data = self.request()['data']
         self.assertTrue(all(s['categoryId'] == child for s in data))

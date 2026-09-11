@@ -250,6 +250,9 @@ def delete_user(username):
     users["users"] = [u for u in users.get("users", []) if u.get("username") != username]
     if len(users["users"]) < before:
         save_users(users)
+        for token, session in list(_sessions.items()):
+            if session['username'] == username:
+                destroy_session(token)
         return True, "已删除"
     return False, "用户不存在"
 
@@ -258,6 +261,8 @@ def get_session_token():
 
 # Simple in-memory session store: token -> {username, role}
 _sessions = {}
+_download_lock = threading.Lock()
+_active_downloads = {}
 
 def create_session(username, role):
     token = get_session_token()
@@ -274,7 +279,10 @@ def get_session(token):
     if time.time() - s["time"] > 7 * 86400:
         del _sessions[token]
         return None
-    return s
+    user = find_user(s['username'])
+    if not user:
+        return None
+    return {**s, 'role': user['role'], 'canDownload': user.get('canDownload', True)}
 
 def destroy_session(token):
     if token in _sessions:
@@ -947,7 +955,7 @@ async function doRegister(){
   if(r.success){SESSION={token:r.session,username:u,role:'admin'};setCookie('session',r.session,7);closeModal();renderHeaderBtns();render();showToast('注册成功！');}
   else{document.getElementById('regErr').style.display='block';document.getElementById('regErr').textContent=r.error||'注册失败';}
 }
-function doLogout(){delCookie('session');SESSION=null;renderHeaderBtns();render();showToast('已退出');}
+async function doLogout(){await api('/api/logout',{method:'POST'});delCookie('session');SESSION=null;renderHeaderBtns();render();showToast('已退出');}
 
 function goHome(){currentView='home';currentSoftware=null;render();}
 function goAdmin(){if(!SESSION||SESSION.role!=='admin')return;currentView='admin';render();}
@@ -1051,16 +1059,25 @@ function renderAdminSoftwareRows(keyword){
 }
 function filterAdminSoftware(keyword){const box=document.getElementById('adminSoftwareList');if(box)box.innerHTML=renderAdminSoftwareRows(keyword);}
 
+document.addEventListener('click',function(event){
+  const link=event.target.closest('a[href^="/download/"]');
+  if(link&&!SESSION){event.preventDefault();showLogin();showToast('请先登录，账号请联系管理员开通');}
+});
 async function loadUserList(){
   const r=await api('/api/users'); if(!r.success)return; let h='';
   for(const u of r.users){
     h+='<div class="user-row"><div class="user-info"><div class="user-name">'+esc(u.username)+'</div><div class="user-role">'+esc(u.created||'')+'</div></div><span class="role-badge '+u.role+'">'+(u.role==='admin'?'管理员':'普通用户')+'</span>';
+    if(u.role!=='admin')h+='<button class="btn btn-sm" data-name="'+esc(u.username)+'" data-allow="'+(!u.canDownload)+'" onclick="setDownloadPermission(this)">'+(u.canDownload?'暂停下载':'允许下载')+'</button>';
     if(u.username!==SESSION.username)h+='<button class="btn btn-sm btn-danger" data-name="'+esc(u.username)+'" onclick="delUser(this.dataset.name)">删除</button>';
     h+='</div>';
   }
   document.getElementById('userList').innerHTML=h||'<p style="color:var(--text-dim);font-size:12px;">暂无其他用户</p>';
 }
 
+async function setDownloadPermission(button){
+  const r=await api('/api/users/'+encodeURIComponent(button.dataset.name),{method:'PUT',body:{canDownload:button.dataset.allow==='true'}});
+  if(r.success){showToast('下载权限已更新');loadUserList();}else showToast(r.error||'保存失败');
+}
 async function addUser(){
   const u=document.getElementById('newUser').value.trim(),p=document.getElementById('newPass').value,r2=document.getElementById('newRole').value;
   if(!u||!p){showToast('请填写用户名和密码');return;}
@@ -1220,19 +1237,36 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path.startswith('/download/'):
+            session = self._get_session()
+            if not session:
+                self.send_error(401, 'Please log in to download')
+                return
+            if not session.get('canDownload', True):
+                self.send_error(403, 'Downloads disabled for this account')
+                return
             rel_path = path[len('/download/'):]
             rel_path = rel_path.replace("\\", "/")
             if rel_path.startswith(UPLOAD_URL_PREFIX):
                 base, rel = UPLOAD_DIR, rel_path[len(UPLOAD_URL_PREFIX):]
             else:
                 base, rel = ROOT_DIR, rel_path
-            safe_path = os.path.normpath(os.path.join(base, rel))
-            base_n = os.path.normpath(base)
+            safe_path = os.path.realpath(os.path.join(base, rel))
+            base_n = os.path.realpath(base)
             if safe_path != base_n and not safe_path.startswith(base_n + os.sep):
                 self.send_error(403, "Forbidden")
                 return
             if os.path.isfile(safe_path):
-                self._serve_download(safe_path)
+                name = session['username']
+                with _download_lock:
+                    if _active_downloads.get(name, 0) >= 2:
+                        self.send_error(429, 'At most two concurrent downloads per account')
+                        return
+                    _active_downloads[name] = _active_downloads.get(name, 0) + 1
+                try:
+                    self._serve_download(safe_path)
+                finally:
+                    with _download_lock:
+                        _active_downloads[name] = max(0, _active_downloads.get(name, 1) - 1)
             else:
                 self.send_error(404, "File not found")
             return
@@ -1257,7 +1291,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             s = self._require_auth('admin')
             if not s: return
             users = load_users()
-            safe_users = [{"username": u["username"], "role": u["role"], "created": u.get("created","")} for u in users.get("users",[])]
+            safe_users = [{"username": u["username"], "role": u["role"], "created": u.get("created",""), "canDownload": u.get("canDownload", True)} for u in users.get("users",[])]
             self._serve_json({"success": True, "users": safe_users})
             return
 
@@ -1277,7 +1311,10 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             self._serve_json(config)
             return
 
-        super().do_GET()
+        self.send_error(404, "Not found")
+
+    def do_HEAD(self):
+        self.send_error(405, "Method not allowed")
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -1359,6 +1396,23 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
     def do_PUT(self):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
+        if path.startswith('/api/users/'):
+            if not self._require_auth('admin'): return
+            name = path[len('/api/users/'):]
+            data = self._read_body()
+            if not isinstance(data.get('canDownload'), bool):
+                self._serve_json({'success': False, 'error': '下载权限必须为开关值'})
+                return
+            with _config_lock:
+                users = load_users()
+                user = next((u for u in users['users'] if u['username'] == name), None)
+                if not user or user['role'] == 'admin':
+                    self._serve_json({'success': False, 'error': '只能修改普通用户的下载权限'})
+                    return
+                user['canDownload'] = data['canDownload']
+                save_users(users)
+            self._serve_json({'success': True})
+            return
         if path == '/api/admin/software':
             s = self._require_auth('admin')
             if not s: return
@@ -1471,12 +1525,16 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             filename = os.path.basename(filepath)
             quoted = urllib.parse.quote(filename)
             self.send_response(200)
+            self.send_header('Cache-Control', 'private, no-store')
             self.send_header('Content-Type', 'application/octet-stream')
             self.send_header('Content-Length', str(filesize))
             self.send_header('Content-Disposition', f"attachment; filename*=UTF-8''{quoted}")
             self.end_headers()
             with open(filepath, 'rb') as f:
                 while True:
+                    session = self._get_session()
+                    if not session or not session.get('canDownload', True):
+                        break
                     chunk = f.read(65536)
                     if not chunk:
                         break
