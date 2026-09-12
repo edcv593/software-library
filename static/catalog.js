@@ -86,7 +86,14 @@ function renderTree() {
   }
   branch('',side);
   side.append(nav('未分类','',ALL_DATA.filter(s => !s.categoryId).length));
-  if (SESSION?.role === 'admin') side.append(button('管理分类与软件',goAdmin));
+  if (SESSION?.role === 'admin') {
+    side.append(button('管理分类与软件',goAdmin));
+    side.append(button('用户管理',()=>{
+      goAdmin();
+      document.getElementById('accountManagement')?.scrollIntoView({block:'start'});
+      document.getElementById('newUser')?.focus({preventScroll:true});
+    }));
+  }
 }
 async function saveCatalog(data) {
   try {
@@ -204,7 +211,11 @@ function renderCatalogManager(container) {
 const originalRenderAdmin = renderAdmin;
 renderAdmin = function(container) {
   originalRenderAdmin(container);
-  if(SESSION?.role==='admin') renderCatalogManager(container);
+  if(SESSION?.role==='admin') {
+    renderCatalogManager(container);
+    const accounts=container.querySelector('#accountManagement');
+    if(accounts) container.prepend(accounts);
+  }
 };
 const originalRender = render;
 render = function() {

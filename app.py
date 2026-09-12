@@ -1032,7 +1032,7 @@ function renderAdmin(c){
   h+='<div class="admin-section"><div class="admin-toolbar"><div><h3>'+svg('package',16)+' 软件管理</h3><p style="color:var(--text-dim);font-size:12px;">只有管理员可以修改官网、下载地址和软件展示设置。</p></div><input class="admin-search" id="adminSoftwareSearch" placeholder="搜索软件名称..." oninput="filterAdminSoftware(this.value)"></div><div id="adminSoftwareList">';
   h+=renderAdminSoftwareRows('');
   h+='</div></div>';
-  h+='<div class="admin-section"><h3>'+svg('users',16)+' 用户管理</h3><div id="userList">加载中...</div>';
+  h+='<div class="admin-section" id="accountManagement"><h3>'+svg('users',16)+' 用户管理</h3><div id="userList">加载中...</div>';
   h+='<div class="edit-row" style="margin-top:10px;"><input type="text" id="newUser" placeholder="新用户名" style="flex:1;"><input type="password" id="newPass" placeholder="密码" style="flex:1;"><select id="newRole" style="padding:7px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px;"><option value="user">普通用户</option><option value="admin">管理员</option></select><button class="btn btn-sm btn-primary" onclick="addUser()">'+svg('plus',12)+' 添加账户</button></div></div>';
   h+='<div class="admin-section"><h3>'+svg('refresh',16)+' 系统管理</h3><button class="btn btn-primary" id="rescanBtn" onclick="doRescan()">'+svg('refresh',12)+' 重新扫描</button></div>';
   c.innerHTML=h;
