@@ -25,6 +25,7 @@ import updates
 import traffic
 import grouping
 import accounts
+import email_signup
 from functools import wraps
 import re
 import json
@@ -53,7 +54,7 @@ SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-APP_VERSION = "11.4.0"
+APP_VERSION = "11.5.0"
 try:
     with open(os.path.join(os.path.dirname(__file__), 'build-info.json'), encoding='utf-8') as build_file:
         _build = json.load(build_file)
@@ -61,6 +62,11 @@ except FileNotFoundError:
     _build = {}
 BUILD_REVISION = _build.get('revision', 'development')
 BUILD_TIME = _build.get('built', 'local')
+_email_instances = {}
+def get_email_signup():
+    with _config_lock:
+        if DATA_DIR not in _email_instances:_email_instances[DATA_DIR]=email_signup.EmailSignup(DATA_DIR)
+        return _email_instances[DATA_DIR]
 _traffic_instances = {}
 _traffic_init_lock = threading.Lock()
 def get_traffic():
@@ -240,11 +246,13 @@ def find_user(username):
     for u in users.get("users", []):
         if u.get("username") == username:
             return u
+    for u in users.get('users',[]):
+        if u.get('emailVerified') and u.get('email')==username.lower():return u
     return None
 
 def create_user(username, password, role="user"):
     users = load_users()
-    if any(u.get("username") == username for u in users.get("users", [])):
+    if find_user(username):
         return False, "用户名已存在"
     users["users"].append({
         "username": username,
@@ -263,7 +271,7 @@ def verify_user(username, password):
         users=load_users()
         u['password']=hash_password(password)
         for item in users['users']:
-            if item['username']==username:item['password']=u['password']
+            if item['username']==u['username']:item['password']=u['password']
         save_users(users)
     return True, u
 
@@ -944,7 +952,8 @@ function renderHeaderBtns(){
   h+='<div class="dropdown" id="userDropdown">';
   h+='<button class="header-btn" onclick="toggleDropdown()">'+svg('user',12)+' '+esc(SESSION.username)+' '+svg('chevron',10)+'</button>';
   h+='<div class="dropdown-menu" id="dropdownMenu">';
-  h+='<button onclick="changeMyPassword()">'+svg('lock',12)+' 修改密码</button>';
+  h+='<button onclick="bindMyEmail()">'+svg('user',12)+' 绑定邮箱</button>';
+  h+='<button onclick="changeMyPassword()">'+svg('lock',12)+' 邮箱重置密码</button>';
   h+='<button onclick="doUpload()">'+svg('upload',12)+' 上传文件</button>';
   h+='<div class="divider"></div>';
   h+='<button onclick="doLogout()" style="color:var(--red)">'+svg('logout',12)+' 退出</button>';
@@ -963,7 +972,7 @@ document.addEventListener('click',function(e){
 
 function showLogin(){
   const mc=document.getElementById('modalContainer');
-  mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>'+svg('lock',20)+' 登录</h2><div class="modal-error" id="loginErr"></div><div class="form-group"><label>用户名</label><input type="text" id="loginUser" placeholder="输入用户名" autocomplete="username"></div><div class="form-group"><label>密码</label><input type="password" id="loginPass" placeholder="输入密码" autocomplete="current-password" onkeydown="if(event.key===\\'Enter\\')doLogin()"></div><div class="modal-btns"><button class="btn btn-primary" style="flex:1" onclick="doLogin()">'+svg('lock',12)+' 登录</button><button class="btn btn-back" onclick="closeModal()">取消</button></div></div></div>';
+  mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>'+svg('lock',20)+' 登录</h2><div class="modal-error" id="loginErr"></div><div class="form-group"><label>用户名或邮箱</label><input type="text" id="loginUser" placeholder="用户名或邮箱" autocomplete="username"></div><div class="form-group"><label>密码</label><input type="password" id="loginPass" placeholder="输入密码" autocomplete="current-password" onkeydown="if(event.key===\\'Enter\\')doLogin()"></div><div class="modal-btns"><button class="btn btn-primary" style="flex:1" onclick="doLogin()">'+svg('lock',12)+' 登录</button><button class="btn btn-back" onclick="closeModal()">取消</button></div></div></div>';
   setTimeout(()=>document.getElementById('loginUser')?.focus(),100);
 }
 function showRegister(){
@@ -1104,8 +1113,8 @@ async function loadUserList(){
   for(const u of r.users){
     h+='<div class="user-row"><div class="user-info"><div class="user-name">'+esc(u.username)+'</div><div class="user-role">'+esc(u.created||'')+'</div></div><span class="role-badge '+u.role+'">'+(u.role==='admin'?'管理员':'普通用户')+'</span>';
     if(u.role!=='admin')h+='<button class="btn btn-sm" data-name="'+esc(u.username)+'" data-allow="'+(!u.canDownload)+'" onclick="setDownloadPermission(this)">'+(u.canDownload?'暂停下载':'允许下载')+'</button>';
-    if(u.disabled)h+='<span>已禁用</span>';
-    if(u.username!==SESSION.username)h+='<button class="btn btn-sm" data-name="'+esc(u.username)+'" data-disabled="'+(!u.disabled)+'" onclick="toggleAccount(this)">'+(u.disabled?'启用账号':'禁用账号')+'</button><button class="btn btn-sm" data-name="'+esc(u.username)+'" onclick="resetAccountPassword(this.dataset.name)">重置密码</button>';
+    if(u.disabled)h+='<span>'+(u.signupPending?'待审批':'已禁用')+'</span>';
+    if(u.username!==SESSION.username)h+='<button class="btn btn-sm" data-name="'+esc(u.username)+'" data-disabled="'+(!u.disabled)+'" onclick="toggleAccount(this)">'+(u.disabled?'启用账号':'禁用账号')+'</button>';
     if(u.username!==SESSION.username)h+='<button class="btn btn-sm btn-danger" data-name="'+esc(u.username)+'" onclick="delUser(this.dataset.name)">删除</button>';
     h+='</div>';
   }
@@ -1236,6 +1245,8 @@ init();
         js = js.replace("init();", asset.read() + "\ninit();")
     with open(os.path.join(asset_dir, "transfers.css"), encoding="utf-8") as asset:
         css += "<style>" + asset.read() + "</style>"
+    with open(os.path.join(asset_dir, "email.js"), encoding="utf-8") as asset:
+        js = js.replace("init();", asset.read()+"\ninit();")
     html = "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>软件库 | Software Library</title>\n" + css + "\n" + body + js
     return html
 
@@ -1343,6 +1354,14 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         if path == '/api/version':
             self._serve_json({'version':APP_VERSION,'revision':BUILD_REVISION,'built':BUILD_TIME})
             return
+        if path == '/api/signup-settings':
+            settings=get_email_signup().settings()
+            self._serve_json({'enabled':bool(settings['enabled'] and has_users()),'approval':settings['approval']})
+            return
+        if path == '/api/admin/email-settings':
+            if not self._require_auth('admin'):return
+            self._serve_json({'success':True,'settings':get_email_signup().public_settings()})
+            return
         if path == '/api/admin/grouping':
             if not self._require_auth('admin'): return
             self._serve_json({'success':True,'suggestions':grouping.suggestions(build_software_list())})
@@ -1372,7 +1391,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         if path == '/api/session':
             s = self._get_session()
             if s:
-                self._serve_json({"success": True, "username": s["username"], "role": s["role"]})
+                self._serve_json({"success": True, "username": s["username"], "role": s["role"], "email":find_user(s["username"]).get("email", "")})
             else:
                 self._serve_json({"success": False})
             return
@@ -1381,7 +1400,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             s = self._require_auth('admin')
             if not s: return
             users = load_users()
-            safe_users = [{"username": u["username"], "role": u["role"], "created": u.get("created",""), "canDownload": u.get("canDownload", True), "disabled":u.get("disabled",False)} for u in users.get("users",[])]
+            safe_users = [{"username": u["username"], "role": u["role"], "created": u.get("created",""), "canDownload": u.get("canDownload", True), "disabled":u.get("disabled",False), "signupPending":u.get("signupPending",False), "email":u.get("email","")} for u in users.get("users",[])]
             self._serve_json({"success": True, "users": safe_users})
             return
 
@@ -1441,10 +1460,16 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_register()
             return
 
+        if path in ('/api/reset-code','/api/reset-password','/api/bind-code','/api/bind-email'):
+            self._handle_email_account(path)
+            return
+        if path in ('/api/signup-code','/api/signup'):
+            self._handle_email_signup(path=='/api/signup-code')
+            return
         if path == '/api/password':
             session=self._require_auth()
             if not session:return
-            self._handle_password(session)
+            self._serve_json({'success':False,'error':'请通过邮箱验证码重置密码'})
             return
         if path == '/api/login':
             self._handle_login()
@@ -1491,6 +1516,13 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
     def do_PUT(self):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
+        if path == '/api/admin/email-settings':
+            if not self._require_auth('admin'):return
+            try:
+                with _config_lock:settings=get_email_signup().configure(self._read_body())
+                self._serve_json({'success':True,'settings':settings})
+            except (ValueError,TypeError) as exc:self._serve_json({'success':False,'error':str(exc)})
+            return
         if path == '/api/admin/traffic':
             if not self._require_auth('admin'): return
             try:
@@ -1505,21 +1537,21 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             name=path[len('/api/users/'):]
             try:
                 data=self._read_body()
-                if not isinstance(data,dict) or not data or set(data)-{'canDownload','disabled','password'}:raise ValueError('账号修改内容无效')
+                if not isinstance(data,dict) or not data or set(data)-{'canDownload','disabled'}:raise ValueError('账号修改内容无效')
                 for key in ('canDownload','disabled'):
                     if key in data and type(data[key]) is not bool:raise ValueError('权限设置必须为开关值')
-                if 'password' in data:accounts.validate_password(data['password'])
-                if name==session['username'] and ('password' in data or data.get('disabled')):raise ValueError('请在账号菜单修改自己的密码，不能禁用自己')
+                if name==session['username'] and data.get('disabled'):raise ValueError('请在账号菜单修改自己的密码，不能禁用自己')
                 with _config_lock:
                     users=load_users()
                     user=next((u for u in users['users'] if u['username']==name),None)
                     if not user:raise ValueError('用户不存在')
                     if 'canDownload' in data and user['role']=='admin':raise ValueError('只能修改普通用户的下载权限')
                     if 'canDownload' in data:user['canDownload']=data['canDownload']
-                    if 'disabled' in data:user['disabled']=data['disabled']
-                    if 'password' in data:user['password']=hash_password(data['password'])
+                    if 'disabled' in data:
+                        user['disabled']=data['disabled']
+                        if not data['disabled']:user['signupPending']=False
                     save_users(users)
-                    if 'password' in data or data.get('disabled'):revoke_user_sessions(name)
+                    if data.get('disabled'):revoke_user_sessions(name)
                 self._serve_json({'success':True})
             except (ValueError,TypeError) as exc:self._serve_json({'success':False,'error':str(exc)})
             return
@@ -1573,42 +1605,88 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self._serve_json({"success": False, "error": msg})
 
+    def _handle_email_signup(self,send_only):
+        try:
+            data=self._read_body()
+            if not isinstance(data,dict):raise ValueError('注册信息格式无效')
+            email=email_signup.email_address(data.get('email'))
+            service=get_email_signup()
+            if not service.settings()['enabled'] or not has_users():raise ValueError('暂未开放邮箱注册，请联系管理员')
+            if send_only:
+                if not find_user(email):service.request_code(email,self.client_address[0])
+                self._serve_json({'success':True,'message':'若邮箱可注册，验证码将发送至该邮箱'})
+                return
+            accounts.validate_password(data.get('password'))
+            with _config_lock:
+                if find_user(email):raise ValueError('此邮箱无法注册，请尝试登录或联系管理员')
+                service.verify_code(email,data.get('code'))
+                ok,message=create_user(email,data['password'],'user')
+                if not ok:raise ValueError(message)
+                users=load_users()
+                pending=service.settings()['approval']
+                for user in users['users']:
+                    if user['username']==email:user.update(email=email,emailVerified=True,signupPending=pending,disabled=pending)
+                save_users(users)
+                token=None if pending else create_session(email,'user')
+            self._serve_json({'success':True,'pending':pending,'session':token,'username':email,'role':'user'})
+        except (ValueError,TypeError) as exc:self._serve_json({'success':False,'error':str(exc)})
+
     @config_transaction
     def _handle_login(self):
         data=self._read_body()
         username=data.get('username','')
         password=data.get('password','')
-        if not isinstance(username,str) or not isinstance(password,str) or len(username)>100 or len(password)>1024:
+        if not isinstance(username,str) or not isinstance(password,str) or len(username)>254 or len(password)>1024:
             self._serve_json({'success':False,'error':'登录信息格式无效'})
             return
         username=username.strip()
+        if '@' in username and not find_user(username):username=username.lower()
         if not _login_guard.attempt(username,self.client_address[0]):
             self._serve_json({'success':False,'error':'尝试次数过多，请 5 分钟后重试'},status=429)
             return
         ok,result=verify_user(username,password)
         if ok:
             _login_guard.success(username,self.client_address[0])
+            username=result['username']
             token=create_session(username,result['role'])
             self._serve_json({'success':True,'session':token,'username':username,'role':result['role']})
         else:self._serve_json({'success':False,'error':result})
 
-    @config_transaction
-    def _handle_password(self, session):
+    def _handle_email_account(self,path):
         try:
             data=self._read_body()
-            accounts.validate_password(data.get('password'))
-            name=session['username']
-            if not _login_guard.attempt(name,self.client_address[0]):
-                self._serve_json({'success':False,'error':'尝试次数过多，请 5 分钟后重试'},status=429)
+            if not isinstance(data,dict):raise ValueError('邮箱信息格式无效')
+            email=email_signup.email_address(data.get('email'))
+            service=get_email_signup()
+            bind=path.startswith('/api/bind-')
+            session=self._get_session() if bind else None
+            if bind and not session:raise ValueError('请先登录再绑定邮箱')
+            purpose='bind:'+session['username'] if bind else 'reset'
+            user=find_user(email)
+            if bind and user and user['username']!=session['username']:raise ValueError('此邮箱已被其他账号使用')
+            if path.endswith('-code'):
+                if bind or (user and user.get('emailVerified') and user.get('email')==email):
+                    service.request_code(email,self.client_address[0],purpose)
+                self._serve_json({'success':True,'message':'若邮箱可用，验证码将发送至该邮箱'})
                 return
-            ok,_=verify_user(name,data.get('currentPassword',''))
-            if not ok:raise ValueError('当前密码不正确')
-            users=load_users()
-            for user in users['users']:
-                if user['username']==name:user['password']=hash_password(data['password'])
-            save_users(users)
-            revoke_user_sessions(name)
-            _login_guard.success(name,self.client_address[0])
+            if not bind:accounts.validate_password(data.get('password'))
+            with _config_lock:
+                user=find_user(email)
+                if bind:
+                    if not self._get_session():raise ValueError('登录已失效')
+                    if user and user['username']!=session['username']:raise ValueError('此邮箱已被使用')
+                    target=session['username']
+                else:
+                    if not user or not user.get('emailVerified') or user.get('email')!=email:raise ValueError('邮箱或验证码无效')
+                    target=user['username']
+                service.verify_code(email,data.get('code'),purpose)
+                users=load_users()
+                for account in users['users']:
+                    if account['username']==target:
+                        if bind:account.update(email=email,emailVerified=True)
+                        else:account['password']=hash_password(data['password'])
+                save_users(users)
+                if not bind:revoke_user_sessions(target)
             self._serve_json({'success':True})
         except (ValueError,TypeError) as exc:self._serve_json({'success':False,'error':str(exc)})
 

@@ -295,25 +295,6 @@ async function toggleAccount(buttonNode){
   const form=modal(disabled?'禁用账号':'启用账号');form.append(el('p',name),el('p',disabled?'禁用后立即退出该账号的所有设备，并停止其下载；软件和历史流量记录保留。':'启用后需要重新登录，原有下载权限保持不变。'));
   actions(form,async()=>{const r=await api('/api/users/'+encodeURIComponent(name),{method:'PUT',body:{disabled}});if(r.success){closeModal();loadUserList();showToast('账号状态已更新');}else showToast(r.error||'更新失败');},disabled?'确认禁用':'确认启用');
 }
-function passwordForm(name,self){
-  const form=modal(self?'修改我的密码':'重置账号密码');form.append(el('p',self?'修改后所有设备需要重新登录。':'账号：'+name+'。重置后该账号所有设备需要重新登录。'));
-  let current;
-  if(self){current=field(form,'当前密码',input(''));current.type='password';current.autocomplete='current-password';current.required=true;}
-  const next=field(form,'新密码',input(''));next.type='password';next.minLength=8;next.maxLength=128;next.autocomplete='new-password';next.required=true;
-  const repeat=field(form,'确认新密码',input(''));repeat.type='password';repeat.autocomplete='new-password';repeat.required=true;
-  form.append(el('p','新密码需为 8–128 个字符。'));
-  actions(form,async()=>{
-    if(next.value!==repeat.value){showToast('两次新密码不一致');return;}
-    const r=await api(self?'/api/password':'/api/users/'+encodeURIComponent(name),{method:self?'POST':'PUT',body:self?{currentPassword:current.value,password:next.value}:{password:next.value}});
-    if(!r.success){showToast(r.error||'保存失败');return;}
-    closeModal();
-    if(self){delCookie('session');SESSION=null;await loadData();renderHeaderBtns();render();showLogin();}
-    else loadUserList();
-    showToast('密码已更新，请使用新密码登录');
-  },'保存新密码');
-}
-function changeMyPassword(){passwordForm(SESSION.username,true);}
-function resetAccountPassword(name){passwordForm(name,false);}
 const accountsOriginalLoad=loadUserList;
 loadUserList=async function(){
   await accountsOriginalLoad();

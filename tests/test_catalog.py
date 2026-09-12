@@ -142,14 +142,9 @@ class CatalogIntegrationTests(unittest.TestCase):
         self.assertIsNone(app.get_session(token))
         token=app.create_session('reader','user')
         _,body=self.fetch_status('/api/users/reader',self.token,'PUT',{'password':'reset-password'})
-        self.assertTrue(json.loads(body)['success'])
-        self.assertIsNone(app.get_session(token))
-        self.assertFalse(app.verify_user('reader','old-password')[0])
-        token=app.create_session('reader','user')
-        _,body=self.fetch_status('/api/password',token,'POST',{'currentPassword':'reset-password','password':'my-new-password'})
-        self.assertTrue(json.loads(body)['success'])
-        self.assertIsNone(app.get_session(token))
-        self.assertTrue(app.verify_user('reader','my-new-password')[0])
+        self.assertFalse(json.loads(body)['success'])
+        _,body=self.fetch_status('/api/password',token,'POST',{'currentPassword':'old-password','password':'my-new-password'})
+        self.assertFalse(json.loads(body)['success'])
         _,body=self.fetch_status('/api/users/test-admin',self.token,'PUT',{'disabled':True})
         self.assertFalse(json.loads(body)['success'])
 
@@ -161,6 +156,36 @@ class CatalogIntegrationTests(unittest.TestCase):
         self.assertFalse(app.verify_user('test-admin','wrong')[0])
         self.assertTrue(app.verify_user('test-admin','old')[0])
         self.assertTrue(app.find_user('test-admin')['password'].startswith('pbkdf2_sha256$'))
+
+    def test_email_signup_binding_and_password_reset(self):
+        from unittest.mock import patch
+        service=app.get_email_signup()
+        service.configure({'enabled':True,'username':'sender@qq.com','sender':'sender@qq.com','password':'test-secret'})
+        with patch.object(service,'deliver') as send:
+            self.fetch_status('/api/signup-code',method='POST',body={'email':'new@qq.com'})
+            code=send.call_args.args[2]
+            _,body=self.fetch_status('/api/signup',method='POST',body={'email':'new@qq.com','code':code,'password':'new-password'})
+            result=json.loads(body)
+            self.assertTrue(result['success']);self.assertFalse(result['pending'])
+            token=result['session']
+            self.assertEqual(app.get_session(token)['role'],'user')
+            self.fetch_status('/api/reset-code',method='POST',body={'email':'new@qq.com'})
+            code=send.call_args.args[2]
+            _,body=self.fetch_status('/api/reset-password',method='POST',body={'email':'new@qq.com','code':code,'password':'reset-password'})
+            self.assertTrue(json.loads(body)['success']);self.assertIsNone(app.get_session(token))
+            self.assertTrue(app.verify_user('new@qq.com','reset-password')[0])
+            self.fetch_status('/api/bind-code',self.token,'POST',{'email':'owner@qq.com'})
+            code=send.call_args.args[2]
+            _,body=self.fetch_status('/api/bind-email',self.token,'POST',{'email':'owner@qq.com','code':code})
+            self.assertTrue(json.loads(body)['success'])
+            _,body=self.fetch_status('/api/login',method='POST',body={'username':'owner@qq.com','password':'test-password'})
+            self.assertEqual(json.loads(body)['username'],'test-admin')
+            self.assertTrue(app.find_user('owner@qq.com')['emailVerified'])
+        _,body=self.fetch_status('/api/admin/email-settings',self.token)
+        self.assertNotIn('password',json.loads(body)['settings'])
+        self.assertEqual(self.fetch_status('/mail-settings.json')[0],404)
+        _,body=self.fetch_status('/api/admin/email-settings')
+        self.assertFalse(json.loads(body)['success'])
 
     def test_traffic_settings_and_download_meter(self):
         app.create_user('reader', 'secret')
@@ -181,7 +206,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         _, logs = self.fetch_status('/api/admin/traffic', self.token)
         self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
         _, version = self.fetch_status('/api/version')
-        self.assertEqual(json.loads(version)['version'],'11.4.0')
+        self.assertEqual(json.loads(version)['version'],'11.5.0')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')
