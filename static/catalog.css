@@ -18,3 +18,4 @@
 .traffic-settings{display:grid;gap:14px;max-width:600px;margin:18px 0}.traffic-settings label{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.traffic-settings input[type=number]{padding:8px;border:1px solid var(--border);border-radius:6px;max-width:150px}.traffic-record{padding:12px 0;border-bottom:1px solid var(--border);overflow-wrap:anywhere}
 
 .catalog-actions[hidden]{display:none}
+.user-row{flex-wrap:wrap;gap:8px}.account-more summary{cursor:pointer}.account-more[open]{display:flex;gap:6px;flex-wrap:wrap}.account-more button{margin:4px}

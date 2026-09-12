@@ -24,6 +24,7 @@ import versions
 import updates
 import traffic
 import grouping
+import accounts
 from functools import wraps
 import re
 import json
@@ -52,7 +53,7 @@ SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-APP_VERSION = "11.3.0"
+APP_VERSION = "11.4.0"
 try:
     with open(os.path.join(os.path.dirname(__file__), 'build-info.json'), encoding='utf-8') as build_file:
         _build = json.load(build_file)
@@ -219,7 +220,7 @@ def get_svg(name):
 # ============================================================
 
 def hash_password(password):
-    return hashlib.sha256(password.encode('utf-8')).hexdigest()
+    return accounts.hash_password(password)
 
 def load_users():
     data = load_json(USERS_FILE, None)
@@ -256,11 +257,20 @@ def create_user(username, password, role="user"):
 
 def verify_user(username, password):
     u = find_user(username)
-    if not u:
-        return False, "用户不存在"
-    if u.get("password") != hash_password(password):
-        return False, "密码错误"
+    if not u or u.get('disabled') or not accounts.check_password(password,u.get('password','')):
+        return False, '用户名或密码错误，或账号已禁用'
+    if not u['password'].startswith('pbkdf2_sha256$'):
+        users=load_users()
+        u['password']=hash_password(password)
+        for item in users['users']:
+            if item['username']==username:item['password']=u['password']
+        save_users(users)
     return True, u
+
+def revoke_user_sessions(username):
+    for token, session in list(_sessions.items()):
+        if session['username']==username:destroy_session(token)
+
 
 def delete_user(username):
     users = load_users()
@@ -279,6 +289,7 @@ def get_session_token():
 
 # Simple in-memory session store: token -> {username, role}
 _sessions = {}
+_login_guard = accounts.LoginGuard()
 
 def create_session(username, role):
     token = get_session_token()
@@ -296,7 +307,7 @@ def get_session(token):
         del _sessions[token]
         return None
     user = find_user(s['username'])
-    if not user:
+    if not user or user.get('disabled'):
         return None
     return {**s, 'role': user['role'], 'canDownload': user.get('canDownload', True)}
 
@@ -448,6 +459,7 @@ def config_transaction(fn):
     return wrapped
 
 delete_user = config_transaction(delete_user)
+verify_user = config_transaction(verify_user)
 
 def save_json(filepath, data):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -932,6 +944,7 @@ function renderHeaderBtns(){
   h+='<div class="dropdown" id="userDropdown">';
   h+='<button class="header-btn" onclick="toggleDropdown()">'+svg('user',12)+' '+esc(SESSION.username)+' '+svg('chevron',10)+'</button>';
   h+='<div class="dropdown-menu" id="dropdownMenu">';
+  h+='<button onclick="changeMyPassword()">'+svg('lock',12)+' 修改密码</button>';
   h+='<button onclick="doUpload()">'+svg('upload',12)+' 上传文件</button>';
   h+='<div class="divider"></div>';
   h+='<button onclick="doLogout()" style="color:var(--red)">'+svg('logout',12)+' 退出</button>';
@@ -951,12 +964,12 @@ document.addEventListener('click',function(e){
 function showLogin(){
   const mc=document.getElementById('modalContainer');
   mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>'+svg('lock',20)+' 登录</h2><div class="modal-error" id="loginErr"></div><div class="form-group"><label>用户名</label><input type="text" id="loginUser" placeholder="输入用户名" autocomplete="username"></div><div class="form-group"><label>密码</label><input type="password" id="loginPass" placeholder="输入密码" autocomplete="current-password" onkeydown="if(event.key===\\'Enter\\')doLogin()"></div><div class="modal-btns"><button class="btn btn-primary" style="flex:1" onclick="doLogin()">'+svg('lock',12)+' 登录</button><button class="btn btn-back" onclick="closeModal()">取消</button></div></div></div>';
-  setTimeout(()=>document.getElementById('loginUser').focus(),100);
+  setTimeout(()=>document.getElementById('loginUser')?.focus(),100);
 }
 function showRegister(){
   const mc=document.getElementById('modalContainer');
   mc.innerHTML='<div class="modal-overlay" onclick="if(event.target===this)closeModal()"><div class="modal"><h2>'+svg('user',20)+' 注册管理员</h2><p style="font-size:12px;color:var(--text-dim);margin-bottom:12px;">首次使用，请创建管理员账号。</p><div class="modal-error" id="regErr"></div><div class="form-group"><label>用户名</label><input type="text" id="regUser" placeholder="创建用户名"></div><div class="form-group"><label>密码</label><input type="password" id="regPass" placeholder="创建密码"></div><div class="form-group"><label>确认密码</label><input type="password" id="regPass2" placeholder="再次输入密码" onkeydown="if(event.key===\\'Enter\\')doRegister()"></div><div class="modal-btns"><button class="btn btn-primary" style="flex:1" onclick="doRegister()">'+svg('plus',12)+' 注册</button></div></div></div>';
-  setTimeout(()=>document.getElementById('regUser').focus(),100);
+  setTimeout(()=>document.getElementById('regUser')?.focus(),100);
 }
 function closeModal(){document.getElementById('modalContainer').innerHTML='';}
 
@@ -1091,6 +1104,8 @@ async function loadUserList(){
   for(const u of r.users){
     h+='<div class="user-row"><div class="user-info"><div class="user-name">'+esc(u.username)+'</div><div class="user-role">'+esc(u.created||'')+'</div></div><span class="role-badge '+u.role+'">'+(u.role==='admin'?'管理员':'普通用户')+'</span>';
     if(u.role!=='admin')h+='<button class="btn btn-sm" data-name="'+esc(u.username)+'" data-allow="'+(!u.canDownload)+'" onclick="setDownloadPermission(this)">'+(u.canDownload?'暂停下载':'允许下载')+'</button>';
+    if(u.disabled)h+='<span>已禁用</span>';
+    if(u.username!==SESSION.username)h+='<button class="btn btn-sm" data-name="'+esc(u.username)+'" data-disabled="'+(!u.disabled)+'" onclick="toggleAccount(this)">'+(u.disabled?'启用账号':'禁用账号')+'</button><button class="btn btn-sm" data-name="'+esc(u.username)+'" onclick="resetAccountPassword(this.dataset.name)">重置密码</button>';
     if(u.username!==SESSION.username)h+='<button class="btn btn-sm btn-danger" data-name="'+esc(u.username)+'" onclick="delUser(this.dataset.name)">删除</button>';
     h+='</div>';
   }
@@ -1366,7 +1381,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             s = self._require_auth('admin')
             if not s: return
             users = load_users()
-            safe_users = [{"username": u["username"], "role": u["role"], "created": u.get("created",""), "canDownload": u.get("canDownload", True)} for u in users.get("users",[])]
+            safe_users = [{"username": u["username"], "role": u["role"], "created": u.get("created",""), "canDownload": u.get("canDownload", True), "disabled":u.get("disabled",False)} for u in users.get("users",[])]
             self._serve_json({"success": True, "users": safe_users})
             return
 
@@ -1426,6 +1441,11 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_register()
             return
 
+        if path == '/api/password':
+            session=self._require_auth()
+            if not session:return
+            self._handle_password(session)
+            return
         if path == '/api/login':
             self._handle_login()
             return
@@ -1480,21 +1500,28 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
                 self._serve_json({'success':False,'error':str(exc)}, status=400)
             return
         if path.startswith('/api/users/'):
-            if not self._require_auth('admin'): return
-            name = path[len('/api/users/'):]
-            data = self._read_body()
-            if not isinstance(data.get('canDownload'), bool):
-                self._serve_json({'success': False, 'error': '下载权限必须为开关值'})
-                return
-            with _config_lock:
-                users = load_users()
-                user = next((u for u in users['users'] if u['username'] == name), None)
-                if not user or user['role'] == 'admin':
-                    self._serve_json({'success': False, 'error': '只能修改普通用户的下载权限'})
-                    return
-                user['canDownload'] = data['canDownload']
-                save_users(users)
-            self._serve_json({'success': True})
+            session=self._require_auth('admin')
+            if not session:return
+            name=path[len('/api/users/'):]
+            try:
+                data=self._read_body()
+                if not isinstance(data,dict) or not data or set(data)-{'canDownload','disabled','password'}:raise ValueError('账号修改内容无效')
+                for key in ('canDownload','disabled'):
+                    if key in data and type(data[key]) is not bool:raise ValueError('权限设置必须为开关值')
+                if 'password' in data:accounts.validate_password(data['password'])
+                if name==session['username'] and ('password' in data or data.get('disabled')):raise ValueError('请在账号菜单修改自己的密码，不能禁用自己')
+                with _config_lock:
+                    users=load_users()
+                    user=next((u for u in users['users'] if u['username']==name),None)
+                    if not user:raise ValueError('用户不存在')
+                    if 'canDownload' in data and user['role']=='admin':raise ValueError('只能修改普通用户的下载权限')
+                    if 'canDownload' in data:user['canDownload']=data['canDownload']
+                    if 'disabled' in data:user['disabled']=data['disabled']
+                    if 'password' in data:user['password']=hash_password(data['password'])
+                    save_users(users)
+                    if 'password' in data or data.get('disabled'):revoke_user_sessions(name)
+                self._serve_json({'success':True})
+            except (ValueError,TypeError) as exc:self._serve_json({'success':False,'error':str(exc)})
             return
         if path == '/api/admin/software':
             s = self._require_auth('admin')
@@ -1535,6 +1562,10 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         if has_users():
             self._serve_json({"success": False, "error": "已存在用户，请联系管理员"})
             return
+        try:accounts.validate_password(password)
+        except ValueError as exc:
+            self._serve_json({'success':False,'error':str(exc)})
+            return
         ok, msg = create_user(username, password, role="admin")
         if ok:
             token = create_session(username, "admin")
@@ -1542,16 +1573,44 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         else:
             self._serve_json({"success": False, "error": msg})
 
+    @config_transaction
     def _handle_login(self):
-        data = self._read_body()
-        username = data.get("username", "").strip()
-        password = data.get("password", "")
-        ok, result = verify_user(username, password)
+        data=self._read_body()
+        username=data.get('username','')
+        password=data.get('password','')
+        if not isinstance(username,str) or not isinstance(password,str) or len(username)>100 or len(password)>1024:
+            self._serve_json({'success':False,'error':'登录信息格式无效'})
+            return
+        username=username.strip()
+        if not _login_guard.attempt(username,self.client_address[0]):
+            self._serve_json({'success':False,'error':'尝试次数过多，请 5 分钟后重试'},status=429)
+            return
+        ok,result=verify_user(username,password)
         if ok:
-            token = create_session(username, result["role"])
-            self._serve_json({"success": True, "session": token, "username": username, "role": result["role"]})
-        else:
-            self._serve_json({"success": False, "error": result})
+            _login_guard.success(username,self.client_address[0])
+            token=create_session(username,result['role'])
+            self._serve_json({'success':True,'session':token,'username':username,'role':result['role']})
+        else:self._serve_json({'success':False,'error':result})
+
+    @config_transaction
+    def _handle_password(self, session):
+        try:
+            data=self._read_body()
+            accounts.validate_password(data.get('password'))
+            name=session['username']
+            if not _login_guard.attempt(name,self.client_address[0]):
+                self._serve_json({'success':False,'error':'尝试次数过多，请 5 分钟后重试'},status=429)
+                return
+            ok,_=verify_user(name,data.get('currentPassword',''))
+            if not ok:raise ValueError('当前密码不正确')
+            users=load_users()
+            for user in users['users']:
+                if user['username']==name:user['password']=hash_password(data['password'])
+            save_users(users)
+            revoke_user_sessions(name)
+            _login_guard.success(name,self.client_address[0])
+            self._serve_json({'success':True})
+        except (ValueError,TypeError) as exc:self._serve_json({'success':False,'error':str(exc)})
 
     @config_transaction
     def _handle_add_user(self):
@@ -1563,6 +1622,10 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             role = "user"
         if not username or not password:
             self._serve_json({"success": False, "error": "用户名和密码不能为空"})
+            return
+        try:accounts.validate_password(password)
+        except ValueError as exc:
+            self._serve_json({'success':False,'error':str(exc)})
             return
         ok, msg = create_user(username, password, role)
         self._serve_json({"success": ok, "message": msg})

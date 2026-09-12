@@ -131,6 +131,37 @@ class CatalogIntegrationTests(unittest.TestCase):
         self.assertEqual(next(v for v in sw['versions'] if v['recommended'])['path'],old)
         self.assertTrue((Path(app.UPLOAD_DIR)/'candidate.exe').exists())
 
+    def test_disable_reset_and_self_password(self):
+        app.create_user('reader','old-password')
+        token=app.create_session('reader','user')
+        _,body=self.fetch_status('/api/users/reader',self.token,'PUT',{'disabled':True})
+        self.assertTrue(json.loads(body)['success'])
+        self.assertIsNone(app.get_session(token))
+        self.assertFalse(app.verify_user('reader','old-password')[0])
+        self.fetch_status('/api/users/reader',self.token,'PUT',{'disabled':False})
+        self.assertIsNone(app.get_session(token))
+        token=app.create_session('reader','user')
+        _,body=self.fetch_status('/api/users/reader',self.token,'PUT',{'password':'reset-password'})
+        self.assertTrue(json.loads(body)['success'])
+        self.assertIsNone(app.get_session(token))
+        self.assertFalse(app.verify_user('reader','old-password')[0])
+        token=app.create_session('reader','user')
+        _,body=self.fetch_status('/api/password',token,'POST',{'currentPassword':'reset-password','password':'my-new-password'})
+        self.assertTrue(json.loads(body)['success'])
+        self.assertIsNone(app.get_session(token))
+        self.assertTrue(app.verify_user('reader','my-new-password')[0])
+        _,body=self.fetch_status('/api/users/test-admin',self.token,'PUT',{'disabled':True})
+        self.assertFalse(json.loads(body)['success'])
+
+    def test_legacy_password_migrates_after_success(self):
+        import hashlib
+        users=app.load_users()
+        users['users'][0]['password']=hashlib.sha256(b'old').hexdigest()
+        app.save_users(users)
+        self.assertFalse(app.verify_user('test-admin','wrong')[0])
+        self.assertTrue(app.verify_user('test-admin','old')[0])
+        self.assertTrue(app.find_user('test-admin')['password'].startswith('pbkdf2_sha256$'))
+
     def test_traffic_settings_and_download_meter(self):
         app.create_user('reader', 'secret')
         token = app.create_session('reader', 'user')
@@ -150,7 +181,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         _, logs = self.fetch_status('/api/admin/traffic', self.token)
         self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
         _, version = self.fetch_status('/api/version')
-        self.assertEqual(json.loads(version)['version'],'11.3.0')
+        self.assertEqual(json.loads(version)['version'],'11.4.0')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')
