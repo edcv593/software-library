@@ -88,6 +88,11 @@ function renderTree() {
   side.append(nav('未分类','',ALL_DATA.filter(s => !s.categoryId).length));
   if (SESSION?.role === 'admin') {
     side.append(button('管理分类与软件',goAdmin));
+    side.append(button('软件管理',()=>{
+      goAdmin();
+      document.getElementById('softwareManagement')?.scrollIntoView({block:'start'});
+      document.getElementById('adminSoftwareSearch')?.focus({preventScroll:true});
+    }));
     side.append(button('用户管理',()=>{
       goAdmin();
       document.getElementById('accountManagement')?.scrollIntoView({block:'start'});
@@ -213,6 +218,8 @@ renderAdmin = function(container) {
   originalRenderAdmin(container);
   if(SESSION?.role==='admin') {
     renderCatalogManager(container);
+    const software=container.querySelector('#softwareManagement');
+    if(software) container.prepend(software);
     const accounts=container.querySelector('#accountManagement');
     if(accounts) container.prepend(accounts);
   }

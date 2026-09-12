@@ -1029,7 +1029,7 @@ function renderVersionPage(c){
 function renderAdmin(c){
   if(!SESSION||SESSION.role!=='admin'){c.innerHTML='<div class="no-results">'+svg('lock',40)+'<p style="margin-top:12px;">需要管理员权限</p></div>';return;}
   let h='<div class="breadcrumb"><a onclick="goHome()">'+svg('back',12)+' 返回软件库</a> / <span>管理面板</span></div>';
-  h+='<div class="admin-section"><div class="admin-toolbar"><div><h3>'+svg('package',16)+' 软件管理</h3><p style="color:var(--text-dim);font-size:12px;">只有管理员可以修改官网、下载地址和软件展示设置。</p></div><input class="admin-search" id="adminSoftwareSearch" placeholder="搜索软件名称..." oninput="filterAdminSoftware(this.value)"></div><div id="adminSoftwareList">';
+  h+='<div class="admin-section" id="softwareManagement"><div class="admin-toolbar"><div><h3>'+svg('package',16)+' 软件管理</h3><p style="color:var(--text-dim);font-size:12px;">只有管理员可以修改官网、下载地址和软件展示设置。</p></div><input class="admin-search" id="adminSoftwareSearch" placeholder="搜索软件名称..." oninput="filterAdminSoftware(this.value)"></div><div id="adminSoftwareList">';
   h+=renderAdminSoftwareRows('');
   h+='</div></div>';
   h+='<div class="admin-section" id="accountManagement"><h3>'+svg('users',16)+' 用户管理</h3><div id="userList">加载中...</div>';
