@@ -4,7 +4,10 @@ LABEL maintainer="software-library"
 LABEL description="Software Library v10 - standalone searchable software mirror"
 
 WORKDIR /app
-COPY app.py catalog.py versions.py transfers.py updates.py /app/
+COPY app.py catalog.py versions.py transfers.py updates.py traffic.py /app/
+COPY .git/ /tmp/build-git/
+COPY build_metadata.py /app/build_metadata.py
+RUN python /app/build_metadata.py /tmp/build-git /app/build-info.json
 COPY static /app/static
 COPY tests /app/tests
 

@@ -81,13 +81,34 @@ class CatalogIntegrationTests(unittest.TestCase):
             self.assertEqual(self.fetch_status(path)[0], 404)
             self.assertEqual(self.fetch_status(path, method='HEAD')[0], 405)
         self.assertEqual(self.fetch_status('/download/uploads/private.exe')[0], 401)
-        app._active_downloads['test-admin'] = 2
+        app.get_traffic().active['test-admin'] = 2
         try:
             self.assertEqual(self.fetch_status('/download/windows.iso', self.token)[0], 429)
         finally:
-            app._active_downloads.clear()
+            app.get_traffic().active.clear()
         self.assertEqual(self.fetch_status('/download/windows.iso', self.token)[0], 200)
         self.assertEqual(self.fetch_status('/download/uploads/private.exe', self.token)[0], 200)
+
+    def test_traffic_settings_and_download_meter(self):
+        app.create_user('reader', 'secret')
+        token = app.create_session('reader', 'user')
+        settings = {'speedKiB':100, 'dailyMiB':1, 'concurrency':1, 'adminExempt':False}
+        _, denied = self.fetch_status('/api/admin/traffic', token, 'PUT', settings)
+        self.assertFalse(json.loads(denied)['success'])
+        _, saved = self.fetch_status('/api/admin/traffic', self.token, 'PUT', settings)
+        self.assertTrue(json.loads(saved)['success'])
+        self.assertEqual(self.fetch_status('/download/windows.iso', token), (200,b'windows test'))
+        _, usage = self.fetch_status('/api/my-traffic', token)
+        self.assertEqual(json.loads(usage)['used'],len(b'windows test'))
+        meter=app.get_traffic()
+        user=app.get_session(token)
+        # Consume the remaining allowance without sending a large test fixture.
+        meter.reserve(0,user,1048576)
+        self.assertEqual(self.fetch_status('/download/windows.iso', token)[0],429)
+        _, logs = self.fetch_status('/api/admin/traffic', self.token)
+        self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
+        _, version = self.fetch_status('/api/version')
+        self.assertEqual(json.loads(version)['version'],'11.1.0')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')

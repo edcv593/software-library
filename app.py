@@ -22,6 +22,7 @@ import catalog
 import transfers
 import versions
 import updates
+import traffic
 from functools import wraps
 import re
 import json
@@ -50,6 +51,22 @@ SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
+APP_VERSION = "11.1.0"
+try:
+    with open(os.path.join(os.path.dirname(__file__), 'build-info.json'), encoding='utf-8') as build_file:
+        _build = json.load(build_file)
+except FileNotFoundError:
+    _build = {}
+BUILD_REVISION = _build.get('revision', 'development')
+BUILD_TIME = _build.get('built', 'local')
+_traffic_instances = {}
+_traffic_init_lock = threading.Lock()
+def get_traffic():
+    with _traffic_init_lock:
+        if DATA_DIR not in _traffic_instances:
+            _traffic_instances[DATA_DIR] = traffic.Traffic(DATA_DIR)
+        return _traffic_instances[DATA_DIR]
+
 
 UPLOAD_URL_PREFIX = "uploads/"  # web path prefix for files stored in UPLOAD_DIR
 
@@ -261,8 +278,6 @@ def get_session_token():
 
 # Simple in-memory session store: token -> {username, role}
 _sessions = {}
-_download_lock = threading.Lock()
-_active_downloads = {}
 
 def create_session(username, role):
     token = get_session_token()
@@ -860,7 +875,7 @@ body{font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;backgroun
 </div></div>
 <div class="cat-bar"><div class="cat-filter"><label for="catSelect">分类</label><select id="catSelect" onchange="selectCategory(this.value)"></select></div></div>
 <div class="container" id="container"></div>
-<div class="footer"><p>软件库 · 共 {total_files} 个文件 · 总计 {total_size_text}</p><p style="margin-top:2px;">最后更新: {now_str}</p></div>
+<div class="footer"><p>软件库 · 共 {total_files} 个文件 · 总计 {total_size_text}</p><p style="margin-top:2px;">版本 {APP_VERSION} · 构建 {BUILD_REVISION[:12]} · {BUILD_TIME}</p><p>最后扫描: {now_str}</p></div>
 <div id="modalContainer"></div>
 """
 
@@ -1194,6 +1209,8 @@ init();
         css += "<style>" + asset.read() + "</style>"
     with open(os.path.join(asset_dir, "transfers.js"), encoding="utf-8") as asset:
         js = js.replace("__TRANSFERS_JS__", asset.read())
+    with open(os.path.join(asset_dir, "traffic.js"), encoding="utf-8") as asset:
+        js = js.replace("init();", asset.read() + "\ninit();")
     with open(os.path.join(asset_dir, "transfers.css"), encoding="utf-8") as asset:
         css += "<style>" + asset.read() + "</style>"
     html = "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>软件库 | Software Library</title>\n" + css + "\n" + body + js
@@ -1257,21 +1274,44 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(403, "Forbidden")
                 return
             if os.path.isfile(safe_path):
-                name = session['username']
-                with _download_lock:
-                    if _active_downloads.get(name, 0) >= 2:
-                        self.send_error(429, 'At most two concurrent downloads per account')
-                        return
-                    _active_downloads[name] = _active_downloads.get(name, 0) + 1
+                meter = get_traffic()
                 try:
-                    self._serve_download(safe_path)
+                    ident = meter.start(session, os.path.basename(safe_path))
+                except ValueError as exc:
+                    self._serve_json({'success':False, 'error':str(exc)}, status=429)
+                    return
+                status = 'interrupted'
+                try:
+                    status = self._serve_download(safe_path, meter, ident, session)
                 finally:
-                    with _download_lock:
-                        _active_downloads[name] = max(0, _active_downloads.get(name, 1) - 1)
+                    meter.finish(ident, session, status)
             else:
                 self.send_error(404, "File not found")
             return
 
+        if path == '/api/admin/check-update':
+            if not self._require_auth('admin'): return
+            try:
+                import requests
+                response = requests.get('https://api.github.com/repos/edcv593/software-library/actions/workflows/docker-publish.yml/runs', params={'status':'success','branch':'main','per_page':1}, timeout=10)
+                response.raise_for_status()
+                latest = response.json()['workflow_runs'][0]['head_sha']
+                self._serve_json({'success':True,'latest':latest,'updateAvailable':latest!=BUILD_REVISION})
+            except Exception:
+                self._serve_json({'success':False,'error':'暂时无法查询发布状态，请稍后重试'})
+            return
+        if path == '/api/version':
+            self._serve_json({'version':APP_VERSION,'revision':BUILD_REVISION,'built':BUILD_TIME})
+            return
+        if path == '/api/admin/traffic':
+            if not self._require_auth('admin'): return
+            self._serve_json({'success':True, **get_traffic().snapshot()})
+            return
+        if path == '/api/my-traffic':
+            session = self._require_auth()
+            if not session: return
+            self._serve_json({'success':True, **get_traffic().snapshot(session['username'])})
+            return
         if path == '/api/software':
             with _config_lock:
                 sw_list = build_software_list()
@@ -1397,6 +1437,14 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
     def do_PUT(self):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
+        if path == '/api/admin/traffic':
+            if not self._require_auth('admin'): return
+            try:
+                settings = get_traffic().configure(self._read_body())
+                self._serve_json({'success':True,'settings':settings})
+            except (ValueError, TypeError) as exc:
+                self._serve_json({'success':False,'error':str(exc)}, status=400)
+            return
         if path.startswith('/api/users/'):
             if not self._require_auth('admin'): return
             name = path[len('/api/users/'):]
@@ -1520,34 +1568,38 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         except FileNotFoundError:
             self.send_error(404, "File not found")
 
-    def _serve_download(self, filepath):
+    def _serve_download(self, filepath, meter, ident, user):
         try:
-            filesize = os.path.getsize(filepath)
-            filename = os.path.basename(filepath)
-            quoted = urllib.parse.quote(filename)
-            self.send_response(200)
-            self.send_header('Cache-Control', 'private, no-store')
-            self.send_header('Content-Type', 'application/octet-stream')
-            self.send_header('Content-Length', str(filesize))
-            self.send_header('Content-Disposition', f"attachment; filename*=UTF-8''{quoted}")
-            self.end_headers()
-            with open(filepath, 'rb') as f:
-                while True:
+            with open(filepath, 'rb') as source:
+                size = os.fstat(source.fileno()).st_size
+                self.send_response(200)
+                self.send_header('Cache-Control', 'private, no-store')
+                self.send_header('Content-Type', 'application/octet-stream')
+                self.send_header('Content-Length', str(size))
+                self.send_header('Content-Disposition', "attachment; filename*=UTF-8''" + urllib.parse.quote(os.path.basename(filepath)))
+                self.end_headers()
+                sent = 0
+                while sent < size:
                     session = self._get_session()
                     if not session or not session.get('canDownload', True):
-                        break
-                    chunk = f.read(65536)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-        except FileNotFoundError:
-            self.send_error(404, "File not found")
-        except Exception as e:
-            self.send_error(500, str(e))
+                        return 'revoked'
+                    chunk = source.read(min(meter.chunk_size(session), size-sent))
+                    if not chunk: return 'interrupted'
+                    meter.pace(len(chunk), session)
+                    session = self._get_session()
+                    if not session or not session.get('canDownload', True): return 'revoked'
+                    amount = meter.reserve(ident, session, len(chunk))
+                    if not amount: return 'quota'
+                    self.wfile.write(chunk[:amount])
+                    sent += amount
+                    if amount < len(chunk): return 'quota'
+                return 'completed'
+        except (OSError, ConnectionError):
+            return 'interrupted'
 
-    def _serve_json(self, data):
+    def _serve_json(self, data, status=200):
         content = json.dumps(data, ensure_ascii=False).encode('utf-8')
-        self.send_response(200)
+        self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(content)))
         self.send_header('Cache-Control', 'no-cache')

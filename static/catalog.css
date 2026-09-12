@@ -14,4 +14,5 @@
 
 .tree-link{background:transparent;border:0;padding:8px 10px;border-radius:6px;color:var(--text-bright);font-size:13px}.tree-link:hover{background:var(--accent-soft,#e8efff)}
 
-.admin-navigation{margin-bottom:16px}.admin-navigation [aria-current="page"]{background:var(--accent);color:white}.software-more summary{cursor:pointer;white-space:nowrap}.software-more[open]{display:flex;flex-wrap:wrap;gap:6px}.software-more button{margin-top:6px}
+.admin-navigation{margin-bottom:16px}.admin-navigation .btn[aria-current="page"]{background:var(--accent);color:white}.software-more summary{cursor:pointer;white-space:nowrap}.software-more[open]{display:flex;flex-wrap:wrap;gap:6px}.software-more button{margin-top:6px}
+.traffic-settings{display:grid;gap:14px;max-width:600px;margin:18px 0}.traffic-settings label{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.traffic-settings input[type=number]{padding:8px;border:1px solid var(--border);border-radius:6px;max-width:150px}.traffic-record{padding:12px 0;border-bottom:1px solid var(--border);overflow-wrap:anywhere}
