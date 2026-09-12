@@ -16,3 +16,5 @@
 
 .admin-navigation{margin-bottom:16px}.admin-navigation .btn[aria-current="page"]{background:var(--accent);color:white}.software-more summary{cursor:pointer;white-space:nowrap}.software-more[open]{display:flex;flex-wrap:wrap;gap:6px}.software-more button{margin-top:6px}
 .traffic-settings{display:grid;gap:14px;max-width:600px;margin:18px 0}.traffic-settings label{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.traffic-settings input[type=number]{padding:8px;border:1px solid var(--border);border-radius:6px;max-width:150px}.traffic-record{padding:12px 0;border-bottom:1px solid var(--border);overflow-wrap:anywhere}
+
+.catalog-actions[hidden]{display:none}

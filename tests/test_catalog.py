@@ -89,6 +89,20 @@ class CatalogIntegrationTests(unittest.TestCase):
         self.assertEqual(self.fetch_status('/download/windows.iso', self.token)[0], 200)
         self.assertEqual(self.fetch_status('/download/uploads/private.exe', self.token)[0], 200)
 
+    def test_software_merge_persists_and_keeps_files(self):
+        data=self.request()['data']
+        target,source=data[0],data[1]
+        req={'action':'merge','names':[target['name'],source['name']],'target':target['name'],'paths':[v['path'] for v in source['versions']]}
+        _,body=self.fetch_status('/api/admin/versions',self.token,'POST',req)
+        self.assertTrue(json.loads(body)['success'])
+        app.run_scan()
+        merged=self.request()['data']
+        self.assertEqual(len(merged),1)
+        self.assertEqual(len(merged[0]['versions']),2)
+        self.assertEqual(len(list(Path(app.ROOT_DIR).iterdir())),2)
+        _,body=self.fetch_status('/api/admin/versions',self.token,'POST',req)
+        self.assertFalse(json.loads(body)['success'])
+
     def test_traffic_settings_and_download_meter(self):
         app.create_user('reader', 'secret')
         token = app.create_session('reader', 'user')
@@ -108,7 +122,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         _, logs = self.fetch_status('/api/admin/traffic', self.token)
         self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
         _, version = self.fetch_status('/api/version')
-        self.assertEqual(json.loads(version)['version'],'11.1.0')
+        self.assertEqual(json.loads(version)['version'],'11.2.0')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')

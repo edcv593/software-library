@@ -190,19 +190,23 @@ function renderCatalogManager(container, categoriesOnly=false) {
     try { if(await saveCatalog({action:'move',names:[...selectedSoftware],categoryId:target.value})) { selectedSoftware.clear(); render(); } }
     finally { move.disabled=false; }
   });
-  const status=el('span'), rows=el('div'),pager=el('div',undefined,'catalog-actions');
+  const status=el('span'), rows=el('div'),pager=el('div',undefined,'catalog-actions'),batch=el('div',undefined,'catalog-actions');
+  batch.setAttribute('aria-label','批量操作');
+  for(const name of selectedSoftware)if(!ALL_DATA.some(s=>s.name===name))selectedSoftware.delete(name);
+  function updateSelection(){status.textContent='已选 '+selectedSoftware.size+' 项';batch.hidden=!selectedSoftware.size;}
   let visible=[],page=0;const pageSize=20;
-  toolbar.append(search,target,move,button('全选当前结果',()=>{visible.forEach(s=>selectedSoftware.add(s.name));draw();}),button('清空选择',()=>{selectedSoftware.clear();draw();}),status);
-  panel.append(toolbar,rows,pager);
+  toolbar.append(search,button('合并建议',showMergeSuggestions),button('全选当前页',()=>{visible.slice(page*pageSize,(page+1)*pageSize).forEach(s=>selectedSoftware.add(s.name));draw();}));
+  batch.append(status,target,move,button('合并所选软件',()=>confirmSoftwareMerge([...selectedSoftware])),button('清空选择',()=>{selectedSoftware.clear();draw();}));
+  panel.append(toolbar,batch,rows,pager);
   function draw() {
     const q=search.value.trim().toLowerCase(); rows.replaceChildren();
     visible=ALL_DATA.filter(s=>[s.name,s.displayName,s.desc,s.notes,...(s.tags||[])].join(' ').toLowerCase().includes(q));
-    status.textContent='已选 '+selectedSoftware.size+' 项';
+    updateSelection();
     page=Math.min(page,Math.max(0,Math.ceil(visible.length/pageSize)-1));
     visible.slice(page*pageSize,(page+1)*pageSize).forEach(sw=> {
       const row=el('div',undefined,'catalog-software-row'), check=el('input'); check.type='checkbox'; check.checked=selectedSoftware.has(sw.name);
       check.setAttribute('aria-label','选择 '+sw.displayName);
-      check.onchange=()=>{check.checked?selectedSoftware.add(sw.name):selectedSoftware.delete(sw.name);status.textContent='已选 '+selectedSoftware.size+' 项';};
+      check.onchange=()=>{check.checked?selectedSoftware.add(sw.name):selectedSoftware.delete(sw.name);updateSelection();};
       const label=el('div'); label.append(el('strong',sw.displayName),el('small',categoryPath(sw.categoryId)));
       const more=el('details',undefined,'software-more');more.append(el('summary','更多操作'));
       more.append(button('官网与更新设置',()=>editOfficialSettings(sw)),button('版本管理',()=>goVersion(sw.name)));
@@ -263,3 +267,26 @@ render = function() {
     container.append(info);
   }
 };
+
+async function showMergeSuggestions(){
+  const form=modal('软件合并建议'),content=el('div');form.append(el('p','仅根据名称中版本号差异提供建议，不会自动合并。不同产品或版本渠道请保留独立。'),content);
+  content.textContent='正在检查…';
+  try{
+    const r=await api('/api/admin/grouping');if(!r.success)throw Error(r.error||'检查失败');content.replaceChildren();
+    for(const group of r.suggestions){const row=el('div',undefined,'traffic-record');row.append(el('strong',group.names.join(' / ')),el('p',`${group.names.length} 个软件 · ${group.files} 个版本文件`),button('核对并合并',()=>confirmSoftwareMerge(group.names)));content.append(row);}
+    if(!r.suggestions.length)content.append(el('p','没有发现高匹配度的重复名称。仍可在软件管理中勾选软件，手动合并。'));
+  }catch(e){content.textContent=e.message;}
+}
+function confirmSoftwareMerge(names){
+  const items=names.map(n=>ALL_DATA.find(s=>s.name===n));
+  if(items.length<2||items.some(s=>!s||!s.versions.length)){showToast('请至少选择两个包含本地版本的软件');return;}
+  const form=modal('确认合并软件');form.append(el('p','文件保持原位；保留目标软件的分类、官网、资料和推荐版本。其他软件的资料不会覆盖目标资料，原版本说明保持不变。'));
+  const target=el('select');target.setAttribute('aria-label','保留的软件');items.forEach(s=>target.append(new Option(s.displayName||s.name,s.name)));const label=el('label','保留的软件');label.append(target);form.append(label);
+  const detail=el('details');detail.append(el('summary',`查看全部 ${items.reduce((n,s)=>n+s.versions.length,0)} 个版本文件`));
+  for(const sw of items){detail.append(el('h3',sw.displayName||sw.name));for(const v of sw.versions)detail.append(el('p',v.filename));}form.append(detail);
+  actions(form,async()=>{
+    const paths=items.filter(s=>s.name!==target.value).flatMap(s=>s.versions.map(v=>v.path));
+    const r=await transferApi('/api/admin/versions',{action:'merge',names,target:target.value,paths});
+    if(r){selectedSoftware.clear();await loadData();closeModal();render();showToast('已合并，所有版本集中到目标软件');}
+  },'确认合并');
+}

@@ -23,6 +23,7 @@ import transfers
 import versions
 import updates
 import traffic
+import grouping
 from functools import wraps
 import re
 import json
@@ -51,7 +52,7 @@ SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-APP_VERSION = "11.1.0"
+APP_VERSION = "11.2.0"
 try:
     with open(os.path.join(os.path.dirname(__file__), 'build-info.json'), encoding='utf-8') as build_file:
         _build = json.load(build_file)
@@ -523,6 +524,8 @@ def build_software_list():
 
     original_names = {item["name"] for item in scan_items}
     for sw_name, cfg in overrides.items():
+        if cfg.get("mergedInto") and sw_name not in grouped:
+            continue
         if sw_name in original_names and sw_name not in grouped:
             continue  # all source files were moved to another logical software
         if sw_name in grouped:
@@ -1303,6 +1306,10 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         if path == '/api/version':
             self._serve_json({'version':APP_VERSION,'revision':BUILD_REVISION,'built':BUILD_TIME})
             return
+        if path == '/api/admin/grouping':
+            if not self._require_auth('admin'): return
+            self._serve_json({'success':True,'suggestions':grouping.suggestions(build_software_list())})
+            return
         if path == '/api/admin/traffic':
             if not self._require_auth('admin'): return
             self._serve_json({'success':True, **get_traffic().snapshot()})
@@ -1645,7 +1652,11 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         try:
             config = load_json(CONFIG_FILE, default_config())
             scan = load_json(SCAN_FILE, {'items': []})
-            versions.manage(config, scan['items'], self._read_body())
+            data = self._read_body()
+            if data.get('action') == 'merge':
+                grouping.merge(config, scan['items'], build_software_list(), data)
+            else:
+                versions.manage(config, scan['items'], data)
             save_json(CONFIG_FILE, config)
             self._serve_json({'success': True})
         except (ValueError, TypeError) as exc:
