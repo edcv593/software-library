@@ -52,7 +52,7 @@ SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-APP_VERSION = "11.2.0"
+APP_VERSION = "11.3.0"
 try:
     with open(os.path.join(os.path.dirname(__file__), 'build-info.json'), encoding='utf-8') as build_file:
         _build = json.load(build_file)
@@ -519,6 +519,7 @@ def build_software_list():
             "channel": version_cfg.get("channel", "stable"),
             "notes": version_cfg.get("notes", ""),
             "recommended": version_cfg.get("recommended", False),
+            "reviewState": version_cfg.get("reviewState", ""),
             "sha256": version_cfg.get("sha256", ""),
         })
 
@@ -589,10 +590,14 @@ def index_transfer(filename, software, sha256, task=None):
             cfg["sha256"] = sha256
             if task and task.get('sync'):
                 current=next((sw for sw in build_software_list() if sw['name']==software),None)
-                for version in (current or {}).get('versions',[]):
-                    if version['path'] != path:
-                        config['versions'].setdefault(version['path'],{}).update(recommended=False,channel='archive')
-                cfg.update(recommended=True,channel='stable')
+                needs_review=task.get('source',{}).get('requireReview',True)
+                if needs_review:
+                    cfg.update(recommended=False,channel='stable',reviewState='pending')
+                else:
+                    for version in (current or {}).get('versions',[]):
+                        if version['path'] != path and version.get('reviewState') not in ('pending','rejected'):
+                            config['versions'].setdefault(version['path'],{}).update(recommended=False,channel='archive')
+                    cfg.update(recommended=True,channel='stable',reviewState='approved')
                 if task.get('releaseVersion'):
                     cfg['version']=task['releaseVersion']
                     cfg['notes']=task.get('releaseNotes','')
@@ -960,7 +965,7 @@ async function doLogin(){
   const p=document.getElementById('loginPass').value;
   if(!u||!p){document.getElementById('loginErr').style.display='block';document.getElementById('loginErr').textContent='请填写用户名和密码';return;}
   const r=await api('/api/login',{method:'POST',body:{username:u,password:p}});
-  if(r.success){SESSION={token:r.session,username:r.username||u,role:r.role};setCookie('session',r.session,7);closeModal();renderHeaderBtns();render();showToast('登录成功');}
+  if(r.success){SESSION={token:r.session,username:r.username||u,role:r.role};setCookie('session',r.session,7);closeModal();await loadData();renderHeaderBtns();render();showToast('登录成功');}
   else{document.getElementById('loginErr').style.display='block';document.getElementById('loginErr').textContent=r.error||'登录失败';}
 }
 async function doRegister(){
@@ -973,7 +978,7 @@ async function doRegister(){
   if(r.success){SESSION={token:r.session,username:u,role:'admin'};setCookie('session',r.session,7);closeModal();renderHeaderBtns();render();showToast('注册成功！');}
   else{document.getElementById('regErr').style.display='block';document.getElementById('regErr').textContent=r.error||'注册失败';}
 }
-async function doLogout(){await api('/api/logout',{method:'POST'});delCookie('session');SESSION=null;renderHeaderBtns();render();showToast('已退出');}
+async function doLogout(){await api('/api/logout',{method:'POST'});delCookie('session');SESSION=null;await loadData();renderHeaderBtns();render();showToast('已退出');}
 
 function goHome(){currentView='home';currentSoftware=null;render();}
 function goAdmin(){if(!SESSION||SESSION.role!=='admin')return;currentView='admin';render();}
@@ -1267,6 +1272,10 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
                 return
             rel_path = path[len('/download/'):]
             rel_path = rel_path.replace("\\", "/")
+            review_cfg=load_json(CONFIG_FILE,default_config()).get('versions',{}).get(rel_path,{})
+            if review_cfg.get('reviewState') in ('pending','rejected') and session.get('role')!='admin':
+                self.send_error(403, 'Version is not published')
+                return
             if rel_path.startswith(UPLOAD_URL_PREFIX):
                 base, rel = UPLOAD_DIR, rel_path[len(UPLOAD_URL_PREFIX):]
             else:
@@ -1276,6 +1285,19 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             if safe_path != base_n and not safe_path.startswith(base_n + os.sep):
                 self.send_error(403, "Forbidden")
                 return
+            canonical_key=(UPLOAD_URL_PREFIX if base==UPLOAD_DIR else '')+os.path.relpath(safe_path,base).replace(os.sep,'/')
+            review_cfg=load_json(CONFIG_FILE,default_config()).get('versions',{}).get(canonical_key,{})
+            if review_cfg.get('reviewState') in ('pending','rejected') and session.get('role')!='admin':
+                self.send_error(403, 'Version is not published')
+                return
+            if session.get('role')!='admin':
+                for version_path,version_settings in load_json(CONFIG_FILE,default_config()).get('versions',{}).items():
+                    if version_settings.get('reviewState') not in ('pending','rejected'): continue
+                    version_base=UPLOAD_DIR if version_path.startswith(UPLOAD_URL_PREFIX) else ROOT_DIR
+                    version_rel=version_path[len(UPLOAD_URL_PREFIX):] if version_path.startswith(UPLOAD_URL_PREFIX) else version_path
+                    if os.path.normcase(os.path.realpath(os.path.join(version_base,version_rel)))==os.path.normcase(safe_path):
+                        self.send_error(403,'Version is not published')
+                        return
             if os.path.isfile(safe_path):
                 meter = get_traffic()
                 try:
@@ -1324,6 +1346,11 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
                 sw_list = build_software_list()
                 config = load_json(CONFIG_FILE, default_config())
                 nodes = catalog.categories(config, sw_list)
+            session=self._get_session()
+            if not session or session.get('role')!='admin':
+                for sw in sw_list:
+                    sw['versions']=[v for v in sw['versions'] if v.get('reviewState') not in ('pending','rejected')]
+                sw_list=[sw for sw in sw_list if sw['versions'] or sw.get('downloadUrl')]
             self._serve_json({"success": True, "data": sw_list, "categories": nodes, "limits": {"upload": MAX_UPLOAD_SIZE, "download": MAX_DOWNLOAD_SIZE, "extensions": list(SUPPORTED_EXTENSIONS)}})
             return
 
@@ -1653,7 +1680,9 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             config = load_json(CONFIG_FILE, default_config())
             scan = load_json(SCAN_FILE, {'items': []})
             data = self._read_body()
-            if data.get('action') == 'merge':
+            if data.get('action') in ('approve','reject','rollback','reopen'):
+                versions.review(config,scan['items'],data)
+            elif data.get('action') == 'merge':
                 grouping.merge(config, scan['items'], build_software_list(), data)
             else:
                 versions.manage(config, scan['items'], data)

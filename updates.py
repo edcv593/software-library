@@ -22,6 +22,8 @@ def settings(data):
     if not isinstance(data.get('auto',False),bool):
         raise ValueError('自动更新设置无效')
     result['auto']=data.get('auto',False)
+    if not isinstance(data.get('requireReview',True),bool):raise ValueError('发布审核设置无效')
+    result['requireReview']=data.get('requireReview',True)
     hours=data.get('intervalHours',24)
     if isinstance(hours,bool) or not isinstance(hours,int) or hours<1 or hours>720:
         raise ValueError('检查间隔必须为 1 至 720 小时')

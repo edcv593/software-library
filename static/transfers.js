@@ -11,7 +11,7 @@ function editOfficialSettings(sw) {
   const official=field(form,'官网地址',input(sw.customOfficial||sw.official,4096));official.type='url';
   const download=field(form,'官方下载直链',input(sw.downloadUrl,4096));download.type='url';
   const visible=el('input');visible.type='checkbox';visible.checked=!!sw.showOfficial;field(form,'在软件详情显示官网入口',visible);
-  form.append(el('h3','同步最新版'),el('p','下载校验成功后，新版设为推荐，旧版转入历史版本。普通官网首页不能作为安装包直链。'));
+  form.append(el('h3','同步最新版'),el('p','默认下载成功后先等待审核；批准后新版设为推荐，旧版保留为历史版本。普通官网首页不能作为安装包直链。'));
   const source=sw.updateSource||{};
   const kind=el('select');kind.add(new Option('始终指向最新版的下载直链','direct'));kind.add(new Option('GitHub Releases 最新稳定版','github'));kind.add(new Option('UU 远程 Windows 官方最新版','uu'));kind.add(new Option('飞牛 fnOS x86 官方最新版','fnos'));kind.value=source.kind||'direct';field(form,'更新源类型',kind);
   const url=field(form,'最新版下载直链',input(source.url||sw.downloadUrl,4096));url.type='url';
@@ -20,12 +20,13 @@ function editOfficialSettings(sw) {
   const pattern=field(form,'发布文件匹配规则',input(source.assetPattern));pattern.placeholder='例如 *windows*x64*.exe（必须只匹配一个文件）';
   function toggle(){for(const node of [url,filename])node.disabled=node.parentElement.hidden=kind.value!=='direct';for(const node of [repo,pattern])node.disabled=node.parentElement.hidden=kind.value!=='github';}kind.onchange=toggle;toggle();
   const auto=el('input');auto.type='checkbox';auto.checked=!!source.auto;field(form,'自动检查并下载更新',auto);
+  const review=el('input');review.type='checkbox';review.checked=source.requireReview!==false;field(form,'下载完成后需管理员批准发布',review);
   const hours=field(form,'检查间隔（小时）',input(String(source.intervalHours||24)));hours.type='number';hours.min='1';hours.max='720';hours.required=true;
   if(sw.lastUpdateCheck)form.append(el('p','上次检查：'+new Date(sw.lastUpdateCheck*1000).toLocaleString()));
   if(sw.lastUpdateError)form.append(el('p',sw.lastUpdateError,'transfer-error'));
   async function save() {
     const result=await transferApi('/api/admin/software',{name:sw.name,customOfficial:official.value,downloadUrl:download.value,showOfficial:visible.checked,
-      updateSource:{kind:kind.value,url:url.value,filename:filename.value,repo:repo.value,assetPattern:pattern.value,auto:auto.checked,intervalHours:Number(hours.value)}});
+      updateSource:{kind:kind.value,url:url.value,filename:filename.value,repo:repo.value,assetPattern:pattern.value,auto:auto.checked,requireReview:review.checked,intervalHours:Number(hours.value)}});
     if(result){await loadData();closeModal();render();showToast('官网与更新设置已保存');}return result;
   }
   const sync=button('保存并立即同步',async()=>{
@@ -116,8 +117,13 @@ renderVersionPage=function(container) {
       const row=el('article',undefined,'version-managed');
       const head=el('div',undefined,'catalog-actions');
       if(admin) {const check=el('input');check.type='checkbox';check.checked=versionSelection.has(v.path);check.setAttribute('aria-label','选择版本 '+v.filename);check.onchange=()=>{check.checked?versionSelection.add(v.path):versionSelection.delete(v.path);count.textContent='已选 '+sw.versions.filter(v=>versionSelection.has(v.path)).length+' 项';};head.append(check);}
+      if(v.reviewState==='pending')head.append(el('strong','待审核'));
+      if(v.reviewState==='rejected')head.append(el('strong','已拒绝'));
       head.append(el('strong',(v.recommended?'★ 推荐 · ':'')+(v.version||v.filename)));
       const download=el('a','下载','btn btn-download');download.href='/download/'+encodeURIComponent(v.path);download.download=v.filename;head.append(download);
+      if(admin&&v.reviewState==='rejected')head.append(button('重新审核',()=>reviewVersion(v,'reopen')));
+      if(admin&&v.reviewState==='pending')head.append(button('批准发布',()=>reviewVersion(v,'approve')),button('拒绝发布',()=>reviewVersion(v,'reject')));
+      if(admin&&v.channel==='archive'&&!['pending','rejected'].includes(v.reviewState))head.append(button('回退到此版本',()=>reviewVersion(v,'rollback')));
       if(admin) head.append(button('编辑版本',()=>editVersion(sw,v)),button('移动版本',()=>moveVersions([v.path],sw.name)));
       row.append(head,el('div',v.filename,'version-path'),el('p',[channelLabels[v.channel]||'稳定版',v.platform,v.arch,v.sizeText,v.date].filter(Boolean).join(' · ')));
       if(v.notes) row.append(el('p',v.notes,'software-notes'));
@@ -159,7 +165,7 @@ function drawQueue() {
     if(['failed','cancelled','completed'].includes(task.status))head.append(button('移除记录',action('remove')));
     row.append(head,el('p',task.sourceUrl||task.url,'queue-url'));
     if(task.provider)row.append(el('p',task.provider==='uu'?'已解析 UU 官方下载跳转':'已获取飞牛官方下载签名'));
-    if(task.sync)row.append(el('p',task.unchanged?'官网同步：文件内容未变化':'官网同步：成功后替换为推荐版本'));
+    if(task.sync)row.append(el('p',task.unchanged?'官网同步：文件内容未变化':'官网同步：按发布审核设置入库，请到版本管理查看'));
     const progress=el('progress');progress.max=task.total||1;
     if(task.total)progress.value=Math.min(task.bytes,task.total);else if(task.status!=='downloading')progress.value=task.status==='completed'?1:0;
     progress.setAttribute('aria-label','下载进度');row.append(progress);
@@ -234,3 +240,9 @@ doUpload=function(software='') {
   picker.onchange=()=>upload([...picker.files]);
   drop.ondragover=e=>e.preventDefault();drop.ondrop=e=>{e.preventDefault();upload([...e.dataTransfer.files]);};
 };
+
+function reviewVersion(version,action){
+  const label={approve:'批准发布',reject:'拒绝发布',rollback:'回退到此版本',reopen:'重新审核'}[action];
+  const form=modal(label);form.append(el('p',version.filename),el('p',action==='reopen'?'此版本恢复为待审核，批准前仍不对普通用户发布。':action==='reject'?'该文件保留给管理员查看，不对普通用户发布。':'此版本将设为推荐，其他已发布版本保留为历史版本，不删除文件。'));
+  actions(form,()=>saveVersion({action,paths:[version.path]}),label);
+}

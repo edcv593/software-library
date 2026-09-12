@@ -217,7 +217,7 @@ class VersionAndUploadApiTests(unittest.TestCase):
     def test_sync_replaces_recommendation_and_keeps_original_files(self):
         name=app.build_software_list()[0]['name']
         Path(app.UPLOAD_DIR).mkdir();(Path(app.UPLOAD_DIR)/'latest.exe').write_bytes(b'latest')
-        app.index_transfer('latest.exe',name,hashlib.sha256(b'latest').hexdigest(),{'sync':True,'releaseVersion':'3.0','releaseNotes':'new release'})
+        app.index_transfer('latest.exe',name,hashlib.sha256(b'latest').hexdigest(),{'sync':True,'source':{'requireReview':False},'releaseVersion':'3.0','releaseNotes':'new release'})
         sw=next(s for s in app.build_software_list() if s['name']==name)
         self.assertEqual(sw['versions'][0]['version'],'3.0');self.assertTrue(sw['versions'][0]['recommended'])
         self.assertEqual(sw['versions'][1]['channel'],'archive')

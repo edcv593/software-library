@@ -103,6 +103,34 @@ class CatalogIntegrationTests(unittest.TestCase):
         _,body=self.fetch_status('/api/admin/versions',self.token,'POST',req)
         self.assertFalse(json.loads(body)['success'])
 
+    def test_pending_approval_rollback_and_public_access(self):
+        import hashlib
+        app.create_user('reader','secret')
+        reader=app.create_session('reader','user')
+        name=app.build_software_list()[0]['name']
+        old=app.build_software_list()[0]['versions'][0]['path']
+        Path(app.UPLOAD_DIR).mkdir()
+        (Path(app.UPLOAD_DIR)/'candidate.exe').write_bytes(b'candidate')
+        app.index_transfer('candidate.exe',name,hashlib.sha256(b'candidate').hexdigest(),{'sync':True})
+        _,public=self.fetch_status('/api/software',reader)
+        self.assertFalse(any(v['filename']=='candidate.exe' for sw in json.loads(public)['data'] for v in sw['versions']))
+        self.assertEqual(self.fetch_status('/download/uploads/candidate.exe',reader)[0],403)
+        self.assertEqual(self.fetch_status('/download/uploads/./candidate.exe',reader)[0],403)
+        self.assertEqual(self.fetch_status('/download/uploads/candidate.exe',self.token)[0],200)
+        action={'action':'approve','paths':['uploads/candidate.exe']}
+        _,denied=self.fetch_status('/api/admin/versions',reader,'POST',action)
+        self.assertFalse(json.loads(denied)['success'])
+        _,approved=self.fetch_status('/api/admin/versions',self.token,'POST',action)
+        self.assertTrue(json.loads(approved)['success'])
+        self.assertEqual(self.fetch_status('/download/uploads/candidate.exe',reader)[0],200)
+        _,stale=self.fetch_status('/api/admin/versions',self.token,'POST',action)
+        self.assertFalse(json.loads(stale)['success'])
+        _,rolled=self.fetch_status('/api/admin/versions',self.token,'POST',{'action':'rollback','paths':[old]})
+        self.assertTrue(json.loads(rolled)['success'])
+        sw=next(s for s in app.build_software_list() if s['name']==name)
+        self.assertEqual(next(v for v in sw['versions'] if v['recommended'])['path'],old)
+        self.assertTrue((Path(app.UPLOAD_DIR)/'candidate.exe').exists())
+
     def test_traffic_settings_and_download_meter(self):
         app.create_user('reader', 'secret')
         token = app.create_session('reader', 'user')
@@ -122,7 +150,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         _, logs = self.fetch_status('/api/admin/traffic', self.token)
         self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
         _, version = self.fetch_status('/api/version')
-        self.assertEqual(json.loads(version)['version'],'11.2.0')
+        self.assertEqual(json.loads(version)['version'],'11.3.0')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')
