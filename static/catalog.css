@@ -13,3 +13,5 @@
 @media(max-width:760px){.library-layout{grid-template-columns:1fr;padding:10px}.category-sidebar{position:static;max-height:260px}.catalog-actions select,.catalog-actions input{max-width:100%}.catalog-modal{padding:18px}.custom-field-row{flex-wrap:wrap}}
 
 .tree-link{background:transparent;border:0;padding:8px 10px;border-radius:6px;color:var(--text-bright);font-size:13px}.tree-link:hover{background:var(--accent-soft,#e8efff)}
+
+.admin-navigation{margin-bottom:16px}.admin-navigation [aria-current="page"]{background:var(--accent);color:white}.software-more summary{cursor:pointer;white-space:nowrap}.software-more[open]{display:flex;flex-wrap:wrap;gap:6px}.software-more button{margin-top:6px}

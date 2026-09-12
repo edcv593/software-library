@@ -87,17 +87,7 @@ function renderTree() {
   branch('',side);
   side.append(nav('未分类','',ALL_DATA.filter(s => !s.categoryId).length));
   if (SESSION?.role === 'admin') {
-    side.append(button('管理分类与软件',goAdmin));
-    side.append(button('软件管理',()=>{
-      goAdmin();
-      document.getElementById('softwareManagement')?.scrollIntoView({block:'start'});
-      document.getElementById('adminSoftwareSearch')?.focus({preventScroll:true});
-    }));
-    side.append(button('用户管理',()=>{
-      goAdmin();
-      document.getElementById('accountManagement')?.scrollIntoView({block:'start'});
-      document.getElementById('newUser')?.focus({preventScroll:true});
-    }));
+    for(const [key,label] of adminSections) side.append(button(label,()=>openAdminSection(key)));
   }
 }
 async function saveCatalog(data) {
@@ -178,14 +168,20 @@ function editMetadata(sw) {
       desc:desc.value,notes:notes.value,tags:tags.value.split(/[,，]/).map(t=>t.trim()).filter(Boolean),customFields});
   });
 }
-function renderCatalogManager(container) {
+let adminSection='software';
+const adminSections=[['software','软件管理'],['categories','分类管理'],['accounts','用户管理'],['system','系统设置']];
+function openAdminSection(key){adminSection=key;goAdmin();window.scrollTo(0,0);}
+function renderCatalogManager(container, categoriesOnly=false) {
   const panel=el('section',undefined,'admin-section catalog-manager');
-  panel.append(el('h3','分类与软件资料'),el('p','创建多级分类，批量归类；软件资料修改后会在重新扫描和重启后保留。'));
+  panel.append(el('h3',categoriesOnly?'分类管理':'软件管理'));
+  if(categoriesOnly){
   panel.append(button('＋ 新建分类',()=>editCategory()));
   const list=el('div',undefined,'category-management-list');
   CATEGORIES.forEach(n=> {
     const row=el('div',undefined,'catalog-actions'); row.append(el('span',categoryPath(n.id)),button('编辑',()=>editCategory(n)),button('删除',()=>deleteCategory(n))); list.append(row);
   }); panel.append(list);
+    container.append(panel);return;
+  }
   const toolbar=el('div',undefined,'catalog-actions'), search=input(''); search.placeholder='搜索软件、标签或备注'; search.setAttribute('aria-label','管理软件搜索');
   const target=categorySelect(''); target.setAttribute('aria-label','批量移动目标分类');
   const move=button('移动所选',async()=> {
@@ -194,35 +190,49 @@ function renderCatalogManager(container) {
     try { if(await saveCatalog({action:'move',names:[...selectedSoftware],categoryId:target.value})) { selectedSoftware.clear(); render(); } }
     finally { move.disabled=false; }
   });
-  const status=el('span'), rows=el('div');
-  let visible=[];
+  const status=el('span'), rows=el('div'),pager=el('div',undefined,'catalog-actions');
+  let visible=[],page=0;const pageSize=20;
   toolbar.append(search,target,move,button('全选当前结果',()=>{visible.forEach(s=>selectedSoftware.add(s.name));draw();}),button('清空选择',()=>{selectedSoftware.clear();draw();}),status);
-  panel.append(toolbar,rows);
+  panel.append(toolbar,rows,pager);
   function draw() {
     const q=search.value.trim().toLowerCase(); rows.replaceChildren();
     visible=ALL_DATA.filter(s=>[s.name,s.displayName,s.desc,s.notes,...(s.tags||[])].join(' ').toLowerCase().includes(q));
     status.textContent='已选 '+selectedSoftware.size+' 项';
-    visible.forEach(sw=> {
+    page=Math.min(page,Math.max(0,Math.ceil(visible.length/pageSize)-1));
+    visible.slice(page*pageSize,(page+1)*pageSize).forEach(sw=> {
       const row=el('div',undefined,'catalog-software-row'), check=el('input'); check.type='checkbox'; check.checked=selectedSoftware.has(sw.name);
       check.setAttribute('aria-label','选择 '+sw.displayName);
       check.onchange=()=>{check.checked?selectedSoftware.add(sw.name):selectedSoftware.delete(sw.name);status.textContent='已选 '+selectedSoftware.size+' 项';};
       const label=el('div'); label.append(el('strong',sw.displayName),el('small',categoryPath(sw.categoryId)));
-      row.append(check,label,button('编辑资料',()=>editMetadata(sw)),button('官网与更新设置',()=>editOfficialSettings(sw))); rows.append(row);
+      const more=el('details',undefined,'software-more');more.append(el('summary','更多操作'));
+      more.append(button('官网与更新设置',()=>editOfficialSettings(sw)),button('版本管理',()=>goVersion(sw.name)));
+      row.append(check,label,button('编辑资料',()=>editMetadata(sw)),more); rows.append(row);
     });
     if(!visible.length) rows.append(el('p','没有匹配的软件'));
+    const prev=button('上一页',()=>{page--;draw();}),next=button('下一页',()=>{page++;draw();});
+    prev.disabled=page===0;next.disabled=(page+1)*pageSize>=visible.length;
+    pager.replaceChildren(prev,el('span',`第 ${page+1} / ${Math.max(1,Math.ceil(visible.length/pageSize))} 页 · 共 ${visible.length} 项`),next);
   }
-  search.oninput=draw; draw(); container.prepend(panel);
+  search.oninput=()=>{page=0;draw();}; draw(); container.append(panel);
 }
 const originalRenderAdmin = renderAdmin;
 renderAdmin = function(container) {
+  if(SESSION?.role!=='admin'){originalRenderAdmin(container);return;}
+  // Reuse account and system forms while showing only the selected section.
   originalRenderAdmin(container);
-  if(SESSION?.role==='admin') {
-    renderCatalogManager(container);
-    const software=container.querySelector('#softwareManagement');
-    if(software) container.prepend(software);
-    const accounts=container.querySelector('#accountManagement');
-    if(accounts) container.prepend(accounts);
+  const accounts=container.querySelector('#accountManagement');
+  const system=container.querySelector('.admin-section:last-child');
+  container.replaceChildren();
+  const navigation=el('nav',undefined,'catalog-actions admin-navigation');
+  navigation.setAttribute('aria-label','管理功能');
+  for(const [key,label] of adminSections){
+    const item=button(label,()=>openAdminSection(key));
+    item.setAttribute('aria-current',key===adminSection?'page':'false');navigation.append(item);
   }
+  container.append(navigation);
+  if(adminSection==='accounts')container.append(accounts);
+  else if(adminSection==='system')container.append(system);
+  else renderCatalogManager(container,adminSection==='categories');
 };
 const originalRender = render;
 render = function() {

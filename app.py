@@ -1071,6 +1071,7 @@ async function loadUserList(){
     if(u.username!==SESSION.username)h+='<button class="btn btn-sm btn-danger" data-name="'+esc(u.username)+'" onclick="delUser(this.dataset.name)">删除</button>';
     h+='</div>';
   }
+  if(!document.getElementById('userList'))return;
   document.getElementById('userList').innerHTML=h||'<p style="color:var(--text-dim);font-size:12px;">暂无其他用户</p>';
 }
 
