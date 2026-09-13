@@ -4,6 +4,7 @@ const selectedSoftware = new Set();
 const collapsedCategories = new Set();
 const browseState = {type:'', sort:'name', page:0, signature:''};
 const browsePageSize = 24;
+const managerState = {query:'', category:'all', selectedOnly:false, page:0};
 function el(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -242,31 +243,46 @@ function renderCatalogManager(container, categoriesOnly=false) {
   }); panel.append(list);
     container.append(panel);return;
   }
-  const toolbar=el('div',undefined,'catalog-actions'), search=input(''); search.placeholder='搜索软件、标签或备注'; search.setAttribute('aria-label','管理软件搜索');
+  const toolbar=el('div',undefined,'catalog-actions'), search=input(managerState.query); search.placeholder='搜索软件、版本、标签或备注'; search.setAttribute('aria-label','管理软件搜索');
+  if(managerState.category!=='all'&&managerState.category!==''&&!CATEGORIES.some(c=>c.id===managerState.category))managerState.category='all';
+  const category=categorySelect(managerState.category);category.insertBefore(new Option('全部分类','all'),category.firstChild);category.value=managerState.category;category.setAttribute('aria-label','筛选软件分类');
+  const onlySelected=button(managerState.selectedOnly?'显示全部结果':'只看已选',()=>{managerState.selectedOnly=!managerState.selectedOnly;page=0;draw();});
   const target=categorySelect(''); target.setAttribute('aria-label','批量移动目标分类');
-  const move=button('移动所选',async()=> {
+  const move=button('移动所选',()=> {
     if(!selectedSoftware.size) { showToast('请先选择软件'); return; }
-    move.disabled=true;
-    try { if(await saveCatalog({action:'move',names:[...selectedSoftware],categoryId:target.value})) { selectedSoftware.clear(); render(); } }
-    finally { move.disabled=false; }
+    const names=[...selectedSoftware],categoryId=target.value;
+    const form=modal('确认移动软件');form.append(el('p',`将 ${names.length} 个软件移至「${categoryPath(categoryId)}」，仅改变分类，文件保持原位。`));
+    const list=el('ul',undefined,'move-review');names.forEach(name=>list.append(el('li',ALL_DATA.find(s=>s.name===name)?.displayName||name)));form.append(list);
+    actions(form,async()=>{if(await saveCatalog({action:'move',names,categoryId})){selectedSoftware.clear();managerState.selectedOnly=false;render();}},'确认移动');
   });
   const status=el('span'), rows=el('div'),pager=el('div',undefined,'catalog-actions'),batch=el('div',undefined,'catalog-actions');
   batch.setAttribute('aria-label','批量操作');
   for(const name of selectedSoftware)if(!ALL_DATA.some(s=>s.name===name))selectedSoftware.delete(name);
-  function updateSelection(){status.textContent='已选 '+selectedSoftware.size+' 项';batch.hidden=!selectedSoftware.size;}
-  let visible=[],page=0;const pageSize=20;
-  toolbar.append(search,button('合并建议',showMergeSuggestions),button('全选当前页',()=>{visible.slice(page*pageSize,(page+1)*pageSize).forEach(s=>selectedSoftware.add(s.name));draw();}));
+  function updateSelection(){
+    const shown=new Set(visible.slice(page*pageSize,(page+1)*pageSize).map(s=>s.name));
+    const elsewhere=[...selectedSoftware].filter(name=>!shown.has(name)).length;
+    status.textContent=`已选 ${selectedSoftware.size} 项${elsewhere?`（其中 ${elsewhere} 项不在当前页）`:''}`;batch.hidden=!selectedSoftware.size;
+    onlySelected.textContent=managerState.selectedOnly?'显示全部结果':'只看已选';onlySelected.setAttribute('aria-pressed',String(managerState.selectedOnly));
+  }
+  let visible=[],page=managerState.page;const pageSize=20;
+  toolbar.append(search,category,onlySelected,button('重置筛选',()=>{managerState.query='';search.value='';managerState.category='all';category.value='all';managerState.selectedOnly=false;page=0;draw();}),button('合并建议',showMergeSuggestions),button('全选当前页',()=>{visible.slice(page*pageSize,(page+1)*pageSize).forEach(s=>selectedSoftware.add(s.name));draw();}));
   batch.append(status,target,move,button('合并所选软件',()=>confirmSoftwareMerge([...selectedSoftware])),button('清空选择',()=>{selectedSoftware.clear();draw();}));
   panel.append(toolbar,batch,rows,pager);
   function draw() {
-    const q=search.value.trim().toLowerCase(); rows.replaceChildren();
-    visible=ALL_DATA.filter(s=>[s.name,s.displayName,s.desc,s.notes,...(s.tags||[])].join(' ').toLowerCase().includes(q));
-    updateSelection();
+    const terms=search.value.trim().toLowerCase().split(/\s+/).filter(Boolean); rows.replaceChildren();
+    const ids=managerState.category==='all'?null:(managerState.category?categoryBranch(managerState.category):new Set(['']));
+    visible=ALL_DATA.filter(s=>{
+      if(ids&&!ids.has(s.categoryId))return false;
+      if(managerState.selectedOnly&&!selectedSoftware.has(s.name))return false;
+      const text=[s.name,s.displayName,s.desc,s.notes,...(s.tags||[]),...Object.entries(s.customFields||{}).flat(),...s.versions.flatMap(v=>[v.filename,v.version,v.platform,v.arch])].join(' ').toLowerCase();
+      return terms.every(q=>text.includes(q));
+    });
     page=Math.min(page,Math.max(0,Math.ceil(visible.length/pageSize)-1));
+    managerState.page=page;updateSelection();
     visible.slice(page*pageSize,(page+1)*pageSize).forEach(sw=> {
       const row=el('div',undefined,'catalog-software-row'), check=el('input'); check.type='checkbox'; check.checked=selectedSoftware.has(sw.name);
       check.setAttribute('aria-label','选择 '+sw.displayName);
-      check.onchange=()=>{check.checked?selectedSoftware.add(sw.name):selectedSoftware.delete(sw.name);updateSelection();};
+      check.onchange=()=>{check.checked?selectedSoftware.add(sw.name):selectedSoftware.delete(sw.name);if(managerState.selectedOnly)draw();else updateSelection();};
       const label=el('div'); label.append(el('strong',sw.displayName),el('small',categoryPath(sw.categoryId)));
       const more=el('details',undefined,'software-more');more.append(el('summary','更多操作'));
       more.append(button('官网与更新设置',()=>editOfficialSettings(sw)),button('版本管理',()=>goVersion(sw.name)));
@@ -277,7 +293,7 @@ function renderCatalogManager(container, categoriesOnly=false) {
     prev.disabled=page===0;next.disabled=(page+1)*pageSize>=visible.length;
     pager.replaceChildren(prev,el('span',`第 ${page+1} / ${Math.max(1,Math.ceil(visible.length/pageSize))} 页 · 共 ${visible.length} 项`),next);
   }
-  search.oninput=()=>{page=0;draw();}; draw(); container.append(panel);
+  search.oninput=()=>{managerState.query=search.value;page=0;draw();};category.onchange=()=>{managerState.category=category.value;page=0;draw();}; draw(); container.append(panel);
 }
 const originalRenderAdmin = renderAdmin;
 renderAdmin = function(container) {
