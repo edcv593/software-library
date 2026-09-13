@@ -54,7 +54,7 @@ SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-APP_VERSION = "11.11.0"
+APP_VERSION = "11.12.0"
 try:
     with open(os.path.join(os.path.dirname(__file__), 'build-info.json'), encoding='utf-8') as build_file:
         _build = json.load(build_file)
@@ -1412,7 +1412,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             s = self._require_auth('admin')
             if not s: return
             users = load_users()
-            safe_users = [{"username": u["username"], "role": u["role"], "created": u.get("created",""), "canDownload": u.get("canDownload", True), "disabled":u.get("disabled",False), "signupPending":u.get("signupPending",False), "email":u.get("email","")} for u in users.get("users",[])]
+            safe_users = [{"username": u["username"], "role": u["role"], "created": u.get("created",""), "canDownload": u.get("canDownload", True), "disabled":u.get("disabled",False), "signupPending":u.get("signupPending",False), "email":u.get("email",""), "emailVerified":bool(u.get("emailVerified",False))} for u in users.get("users",[])]
             self._serve_json({"success": True, "users": safe_users})
             return
 

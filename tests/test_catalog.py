@@ -181,6 +181,12 @@ class CatalogIntegrationTests(unittest.TestCase):
             _,body=self.fetch_status('/api/login',method='POST',body={'username':'owner@qq.com','password':'test-password'})
             self.assertEqual(json.loads(body)['username'],'test-admin')
             self.assertTrue(app.find_user('owner@qq.com')['emailVerified'])
+            _,body=self.fetch_status('/api/users',self.token)
+            listed=json.loads(body)['users']
+            self.assertTrue(next(u for u in listed if u['username']=='test-admin')['emailVerified'])
+            self.assertTrue(all('password' not in u for u in listed))
+            _,body=self.fetch_status('/api/users')
+            self.assertFalse(json.loads(body)['success'])
         _,body=self.fetch_status('/api/admin/email-settings',self.token)
         self.assertNotIn('password',json.loads(body)['settings'])
         self.assertEqual(self.fetch_status('/mail-settings.json')[0],404)
@@ -224,7 +230,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         _, logs = self.fetch_status('/api/admin/traffic', self.token)
         self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
         _, version = self.fetch_status('/api/version')
-        self.assertEqual(json.loads(version)['version'],'11.11.0')
+        self.assertEqual(json.loads(version)['version'],'11.12.0')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')

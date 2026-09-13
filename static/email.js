@@ -1,4 +1,54 @@
 // All registration, binding and password recovery use purpose-specific email codes.
+const accountView={owner:'',query:'',filter:'all',page:0};
+let accountLoadSequence=0;
+loadUserList=async function(){
+  const host=document.getElementById('userList');if(!host||SESSION?.role!=='admin')return;
+  const sequence=++accountLoadSequence,token=SESSION.token;
+  if(accountView.owner!==SESSION.username)Object.assign(accountView,{owner:SESSION.username,query:'',filter:'all',page:0});
+  host.replaceChildren(el('p','正在读取账号…'));
+  try{
+    const r=await api('/api/users');
+    if(sequence!==accountLoadSequence||!host.isConnected||SESSION?.token!==token||SESSION?.role!=='admin')return;
+    if(!r.success)throw Error(r.error||'读取失败');
+    const users=r.users.slice().sort((a,b)=>Number(!!b.signupPending)-Number(!!a.signupPending)||a.username.localeCompare(b.username,'zh-CN',{numeric:true}));
+    const toolbar=el('div',undefined,'catalog-actions'),search=input(accountView.query,254);search.placeholder='搜索账号或邮箱';search.setAttribute('aria-label','搜索账号或邮箱');
+    const filter=el('select');filter.setAttribute('aria-label','账号状态筛选');
+    [['all','全部账号'],['pending','待审批'],['disabled','已禁用'],['paused','下载已暂停'],['verified','邮箱已验证'],['unbound','邮箱未验证或未绑定']].forEach(([value,label])=>filter.add(new Option(label,value)));filter.value=accountView.filter;
+    toolbar.append(search,filter,button('重置账号筛选',()=>{search.value='';filter.value='all';change();}));
+    const summary=el('p',undefined,'browse-summary');summary.setAttribute('role','status');const rows=el('div'),pager=el('nav',undefined,'browse-pagination');pager.setAttribute('aria-label','用户列表分页');
+    host.replaceChildren(toolbar,summary,rows,pager);
+    function draw(){
+      const terms=accountView.query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+      const visible=users.filter(u=>{
+        const verified=!!u.email&&u.emailVerified;
+        const match={all:true,pending:!!u.signupPending,disabled:!!u.disabled&&!u.signupPending,paused:u.role!=='admin'&&!u.canDownload,verified,unbound:!verified}[accountView.filter];
+        return match&&terms.every(q=>[u.username,u.email].join(' ').toLowerCase().includes(q));
+      });
+      const size=20,pages=Math.max(1,Math.ceil(visible.length/size));accountView.page=Math.min(accountView.page,pages-1);const start=accountView.page*size;
+      summary.textContent=`共 ${users.length} 个账号 · 待审批 ${users.filter(u=>u.signupPending).length} 个 · 匹配 ${visible.length} 个${visible.length?` · 显示 ${start+1}–${Math.min(start+size,visible.length)}`:''}`;
+      rows.replaceChildren();
+      visible.slice(start,start+size).forEach(u=>{
+        const row=el('div',undefined,'user-row'),info=el('div',undefined,'user-info');
+        info.append(el('div',u.username,'user-name'),el('div',u.email?`${u.email} · ${u.emailVerified?'邮箱已验证':'邮箱未验证'}`:'未绑定邮箱','user-role'),el('div',u.created||'','user-role'));
+        row.append(info,el('span',u.role==='admin'?'管理员':'普通用户','role-badge '+(u.role==='admin'?'admin':'user')));
+        row.append(el('span',u.signupPending?'待审批':u.disabled?'已禁用':'账号正常'));
+        const update=(label,body)=>{const b=button(label,async()=>{b.disabled=true;try{const result=await api('/api/users/'+encodeURIComponent(u.username),{method:'PUT',body});if(!result.success){showToast(result.error||'更新失败');return;}showToast('账号已更新');await loadUserList();}catch(e){showToast('更新结果未确认，请刷新账号列表后核对');}finally{b.disabled=false;}});return b;};
+        if(u.role!=='admin'){row.append(el('span',u.canDownload?'下载已允许':'下载已暂停'));if(!u.disabled)row.append(update(u.canDownload?'暂停下载':'允许下载',{canDownload:!u.canDownload}));}
+        if(u.username!==SESSION.username){
+          if(u.signupPending)row.append(update('批准注册',{disabled:false}));
+          const more=el('details',undefined,'account-more');more.append(el('summary','更多操作'));
+          if(!u.signupPending)more.append(update(u.disabled?'启用账号':'禁用账号',{disabled:!u.disabled}));
+          more.append(button('删除账号',()=>delUser(u.username)));row.append(more);
+        }
+        rows.append(row);
+      });
+      if(!visible.length)rows.append(el('p','没有匹配的账号，请更换关键词或重置筛选。'));
+      pager.replaceChildren();if(pages>1){const prev=button('上一页',()=>{accountView.page--;draw();}),next=button('下一页',()=>{accountView.page++;draw();});prev.disabled=accountView.page===0;next.disabled=accountView.page===pages-1;pager.append(prev,el('span',`第 ${accountView.page+1} / ${pages} 页`),next);}
+    }
+    function change(){accountView.query=search.value;accountView.filter=filter.value;accountView.page=0;draw();}
+    search.oninput=change;filter.onchange=change;draw();
+  }catch(e){if(sequence===accountLoadSequence&&host.isConnected&&SESSION?.token===token)host.replaceChildren(el('p','账号列表读取失败：'+e.message),button('重新加载',loadUserList));}
+};
 const emailSendState=new Map();
 function emailFlow(kind,initial=''){
   const title={signup:'邮箱注册',bind:'绑定或更换邮箱',reset:'邮箱重置密码'}[kind];
