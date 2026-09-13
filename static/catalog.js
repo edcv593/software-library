@@ -2,6 +2,8 @@
 let CATEGORIES = [];
 const selectedSoftware = new Set();
 const collapsedCategories = new Set();
+const browseState = {type:'', sort:'name', page:0, signature:''};
+const browsePageSize = 24;
 function el(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -46,9 +48,67 @@ loadData = async function() {
 };
 getFiltered = function() {
   const ids = currentCat === 'all' ? null : (currentCat ? categoryBranch(currentCat) : new Set(['']));
-  return ALL_DATA.filter(s => (!ids || ids.has(s.categoryId)) &&
-    (!searchTerm || [s.name,s.displayName,s.desc,categoryPath(s.categoryId),s.notes,...(s.tags||[]),
-      ...Object.entries(s.customFields||{}).flat()].join(' ').toLowerCase().includes(searchTerm)));
+  const terms=searchTerm.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const items=ALL_DATA.filter(s => {
+    if(ids && !ids.has(s.categoryId))return false;
+    if(browseState.type && !s.versions.some(v=>v.fileType===browseState.type))return false;
+    const text=[s.name,s.displayName,s.desc,categoryPath(s.categoryId),s.notes,...(s.tags||[]),
+      ...Object.entries(s.customFields||{}).flat(),...s.versions.flatMap(v=>[v.filename,v.version,v.platform,v.arch])].join(' ').toLowerCase();
+    return terms.every(term=>text.includes(term));
+  });
+  const name=(a,b)=>(a.displayName||a.name).localeCompare(b.displayName||b.name,'zh-CN',{numeric:true})||a.name.localeCompare(b.name);
+  const newest=s=>s.versions.reduce((latest,v)=>v.date>latest?v.date:latest,'');
+  const largest=s=>s.versions.reduce((size,v)=>Math.max(size,v.size||0),0);
+  return items.sort((a,b)=>(browseState.sort==='date'?newest(b).localeCompare(newest(a)):browseState.sort==='size'?largest(b)-largest(a):0)||name(a,b));
+};
+
+function resetBrowse(){
+  browseState.type='';browseState.sort='name';browseState.page=0;searchTerm='';currentCat='all';
+  const search=document.getElementById('searchInput');if(search)search.value='';render();
+}
+
+renderHome = function(container){
+  const signature=JSON.stringify([currentCat,searchTerm,browseState.type,browseState.sort]);
+  if(signature!==browseState.signature){browseState.page=0;browseState.signature=signature;}
+  const items=getFiltered(),pages=Math.max(1,Math.ceil(items.length/browsePageSize));
+  browseState.page=Math.min(browseState.page,pages-1);
+  const start=browseState.page*browsePageSize;
+  document.getElementById('statCount').textContent=items.reduce((n,s)=>n+s.versions.length,0);
+  container.replaceChildren();
+  const toolbar=el('section',undefined,'browse-toolbar');toolbar.setAttribute('aria-label','软件筛选');
+  toolbar.append(el('strong',currentCat==='all'?'全部软件':categoryPath(currentCat)));
+  const type=el('select');type.setAttribute('aria-label','文件类型');type.add(new Option('全部文件类型',''));
+  [...new Set(ALL_DATA.flatMap(s=>s.versions.map(v=>v.fileType)).filter(Boolean))].sort().forEach(t=>type.add(new Option(t,t)));
+  type.value=browseState.type;type.onchange=()=>{browseState.type=type.value;render();};
+  const sort=el('select');sort.setAttribute('aria-label','软件排序');
+  [['名称排序','name'],['文件日期从新到旧','date'],['最大版本文件从大到小','size']].forEach(([label,value])=>sort.add(new Option(label,value)));
+  sort.value=browseState.sort;sort.onchange=()=>{browseState.sort=sort.value;render();};toolbar.append(type,sort);
+  if(searchTerm||currentCat!=='all'||browseState.type||browseState.sort!=='name')toolbar.append(button('重置筛选',resetBrowse));
+  container.append(toolbar);
+  const summary=el('p',`共 ${items.length} 个软件${items.length?` · 显示 ${start+1}–${Math.min(start+browsePageSize,items.length)}`:''}${searchTerm?` · 搜索：${searchTerm}`:''}`,'browse-summary');summary.setAttribute('role','status');container.append(summary);
+  if(!items.length){const empty=el('div',undefined,'no-results');empty.append(el('p','没有找到匹配的软件，可更换关键词或清除筛选。'),button('显示全部软件',resetBrowse));container.append(empty);return;}
+  const grid=el('div',undefined,'grid');
+  items.slice(start,start+browsePageSize).forEach(sw=>{
+    const card=el('article',undefined,'card');
+    const top=el('div',undefined,'card-top'),icon=el('div',undefined,'card-icon');icon.innerHTML=svg(sw.icon||'box',20);icon.setAttribute('aria-hidden','true');
+    const info=el('div',undefined,'card-info'),title=button(sw.displayName||sw.name,()=>goVersion(sw.name));title.className='card-title browse-title';title.title=sw.displayName||sw.name;
+    info.append(title,el('div',sw.desc||categoryPath(sw.categoryId),'card-desc'));top.append(icon,info);card.append(top);
+    card.onclick=e=>{if(!e.target.closest('button'))goVersion(sw.name);};
+    const latest=sw.versions.find(v=>v.recommended)||sw.versions[0]||{};
+    const meta=el('div',undefined,'card-meta');
+    for(const [value,kind] of [[latest.fileType,'type'],[latest.sizeText,'size'],[latest.date,'date']])if(value)meta.append(el('span',value,'meta-tag '+kind));
+    if(sw.showOfficial&&(sw.official||sw.customOfficial))meta.append(el('span','官网','official-badge'));
+    if(sw.downloadUrl)meta.append(el('span','直链','official-badge'));
+    card.append(meta);
+    const footer=el('div',undefined,'card-footer');footer.append(el('span',categoryPath(sw.categoryId),'browse-category'),el('span',`${sw.versions.length} 个版本`,'card-versions-count'));
+    card.append(footer);grid.append(card);
+  });container.append(grid);
+  if(pages>1){
+    const nav=el('nav',undefined,'browse-pagination');nav.setAttribute('aria-label','软件列表分页');
+    const move=delta=>{browseState.page+=delta;render();document.querySelector('.browse-toolbar').scrollIntoView({block:'start'});document.querySelector('.browse-pagination button:not(:disabled)')?.focus({preventScroll:true});};
+    const prev=button('上一页',()=>move(-1)),next=button('下一页',()=>move(1));prev.disabled=browseState.page===0;next.disabled=browseState.page===pages-1;
+    nav.append(prev,el('span',`第 ${browseState.page+1} / ${pages} 页`),next);container.append(nav);
+  }
 };
 selectCategory = function(id) { currentCat = id; currentView = 'home'; currentSoftware = null; render(); };
 renderCatSelect = function() {};
@@ -251,12 +311,6 @@ render = function() {
   }
   if(currentView!=='home') document.getElementById('statCount').textContent=totalFiles;
   const container=document.getElementById('container');
-  if(currentView==='home') {
-    // Keep identity and display names separate, and avoid inline handlers for file names.
-    const groups=Object.create(null); getFiltered().forEach(sw=>(groups[sw.categoryId]??=[]).push(sw));
-    const items=Object.keys(groups).sort().flatMap(k=>groups[k]);
-    container.querySelectorAll('.card').forEach((card,i)=>{card.removeAttribute('onclick');card.onclick=()=>goVersion(items[i].name);});
-  }
   if(currentView==='version') {
     const sw=ALL_DATA.find(s=>s.name===currentSoftware); if(!sw) return;
     const info=el('section',undefined,'admin-section software-info'); info.append(el('h3',sw.displayName),el('p',categoryPath(sw.categoryId)));
