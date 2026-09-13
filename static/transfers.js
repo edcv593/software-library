@@ -3,6 +3,7 @@ let activeUpload = null;
 let queuePollRunning = false;
 let queueTasks = [];
 const versionSelection = new Set();
+let versionViewState={key:'',query:'',sort:'recommended',history:false,state:'all',page:0};
 const channelLabels = {stable:'稳定版',beta:'测试版',archive:'历史版'};
 const taskLabels = {queued:'等待中',indexing:'正在入库',downloading:'下载中',cancelling:'正在取消',completed:'已完成',failed:'失败',cancelled:'已取消'};
 function updateTransferLimits(limits) { if(limits) TRANSFER_LIMITS=limits; }
@@ -94,29 +95,46 @@ renderVersionPage=function(container) {
   }
   panel.append(links);
   const admin=SESSION?.role==='admin',count=el('span');
+  const key=JSON.stringify([sw.name,SESSION?.role||'guest']);
+  if(versionViewState.key!==key)versionViewState={key,query:'',sort:'recommended',history:false,state:'all',page:0};
+  const state=versionViewState,pageSize=12;
   const toolbar=el('div',undefined,'catalog-actions');
-  const search=input('');search.placeholder='搜索版本号、系统、架构、文件名';search.setAttribute('aria-label','筛选版本');
+  const search=input(state.query);search.placeholder='搜索版本号、系统、架构、文件名';search.setAttribute('aria-label','筛选版本');
   const sort=el('select');[['recommended','推荐优先'],['newest','日期从新到旧'],['version','版本号从高到低']].forEach(([k,v])=>sort.add(new Option(v,k)));sort.setAttribute('aria-label','版本排序');
   const history=el('input');history.type='checkbox';history.setAttribute('aria-label','显示历史版本');const historyLabel=el('label');historyLabel.append(history,el('span',' 显示历史版本'));
-  toolbar.append(search,sort,historyLabel);
-  if(admin) toolbar.append(button('全选当前版本',()=>{filtered().forEach(v=>versionSelection.add(v.path));draw();}),
+  sort.value=state.sort;history.checked=state.history;
+  const review=el('select');review.setAttribute('aria-label','版本发布状态');[['all','全部发布状态'],['published','已发布'],['pending','待审核'],['rejected','已拒绝']].forEach(([value,label])=>review.add(new Option(label,value)));review.value=state.state;
+  toolbar.append(search,sort,historyLabel);if(admin)toolbar.append(review);
+  toolbar.append(button('重置版本筛选',()=>{search.value='';sort.value='recommended';history.checked=false;review.value='all';change();}));
+  if(admin) toolbar.append(button('全选本页版本',()=>{filtered().slice(state.page*pageSize,(state.page+1)*pageSize).forEach(v=>versionSelection.add(v.path));draw();}),
     button('清空选择',()=>{versionSelection.clear();draw();}),button('合并 / 拆分所选',()=>{
       const paths=sw.versions.filter(v=>versionSelection.has(v.path)).map(v=>v.path);
       if(!paths.length){showToast('请先选择版本');return;}moveVersions(paths,sw.name);
     }),button('上传新版本',()=>doUpload(sw.name)),button('官网与更新设置',()=>editOfficialSettings(sw)),count);
   panel.append(toolbar);
-  const rows=el('div');panel.append(rows);
+  const rows=el('div'),summary=el('p',undefined,'browse-summary'),pager=el('nav',undefined,'browse-pagination');summary.setAttribute('role','status');pager.setAttribute('aria-label','版本列表分页');panel.append(summary,rows,pager);
   function filtered() {
-    const q=search.value.toLowerCase().trim();
-    const list=sw.versions.filter(v=>(history.checked||v.channel!=='archive')&&[v.filename,v.version,v.platform,v.arch,v.notes,channelLabels[v.channel]].join(' ').toLowerCase().includes(q));
+    const terms=search.value.toLowerCase().trim().split(/\s+/).filter(Boolean);
+    const list=sw.versions.filter(v=>{
+      const unpublished=['pending','rejected'].includes(v.reviewState);
+      if(!admin&&unpublished)return false;
+      if(admin&&review.value!=='all'&&(review.value==='published'?unpublished:v.reviewState!==review.value))return false;
+      if(!history.checked&&v.channel==='archive')return false;
+      const text=[v.filename,v.version,v.platform,v.arch,v.notes,channelLabels[v.channel]].join(' ').toLowerCase();
+      return terms.every(q=>text.includes(q));
+    });
     return list.sort((a,b)=>sort.value==='newest'?(b.date||'').localeCompare(a.date||''):sort.value==='version'?(b.version||b.filename).localeCompare(a.version||a.filename,undefined,{numeric:true}):Number(b.recommended)-Number(a.recommended));
   }
   function draw() {
-    rows.replaceChildren();count.textContent='已选 '+sw.versions.filter(v=>versionSelection.has(v.path)).length+' 项';
-    filtered().forEach(v=> {
+    const list=filtered(),pages=Math.max(1,Math.ceil(list.length/pageSize));state.page=Math.min(state.page,pages-1);
+    const start=state.page*pageSize,shown=list.slice(start,start+pageSize);
+    rows.replaceChildren();
+    function updateCount(){const selected=sw.versions.filter(v=>versionSelection.has(v.path)),elsewhere=selected.filter(v=>!shown.some(x=>x.path===v.path)).length;count.textContent=`已选 ${selected.length} 项${elsewhere?`（${elsewhere} 项不在当前页）`:''}`;}
+    updateCount();summary.textContent=`共 ${list.length} 个匹配版本${list.length?` · 显示 ${start+1}–${Math.min(start+pageSize,list.length)}`:''}${!history.checked?' · 历史版本已隐藏':''}`;
+    shown.forEach(v=> {
       const row=el('article',undefined,'version-managed');
       const head=el('div',undefined,'catalog-actions');
-      if(admin) {const check=el('input');check.type='checkbox';check.checked=versionSelection.has(v.path);check.setAttribute('aria-label','选择版本 '+v.filename);check.onchange=()=>{check.checked?versionSelection.add(v.path):versionSelection.delete(v.path);count.textContent='已选 '+sw.versions.filter(v=>versionSelection.has(v.path)).length+' 项';};head.append(check);}
+      if(admin) {const check=el('input');check.type='checkbox';check.checked=versionSelection.has(v.path);check.setAttribute('aria-label','选择版本 '+v.filename);check.onchange=()=>{check.checked?versionSelection.add(v.path):versionSelection.delete(v.path);updateCount();};head.append(check);}
       if(v.reviewState==='pending')head.append(el('strong','待审核'));
       if(v.reviewState==='rejected')head.append(el('strong','已拒绝'));
       head.append(el('strong',(v.recommended?'★ 推荐 · ':'')+(v.version||v.filename)));
@@ -125,15 +143,17 @@ renderVersionPage=function(container) {
       if(admin&&v.reviewState==='rejected')head.append(button('重新审核',()=>reviewVersion(v,'reopen')));
       if(admin&&v.reviewState==='pending')head.append(button('批准发布',()=>reviewVersion(v,'approve')),button('拒绝发布',()=>reviewVersion(v,'reject')));
       if(admin&&v.channel==='archive'&&!['pending','rejected'].includes(v.reviewState))head.append(button('回退到此版本',()=>reviewVersion(v,'rollback')));
-      if(admin) head.append(button('下载来源',()=>editDownloadSource(v)),button('编辑版本',()=>editVersion(sw,v)),button('移动版本',()=>moveVersions([v.path],sw.name)));
+      if(admin) {const more=el('details',undefined,'software-more');more.append(el('summary','更多操作'),button('下载来源',()=>editDownloadSource(v)),button('编辑版本',()=>editVersion(sw,v)),button('移动版本',()=>moveVersions([v.path],sw.name)));head.append(more);}
       row.append(head,el('div',v.filename,'version-path'),el('p',[channelLabels[v.channel]||'稳定版',v.platform,v.arch,v.sizeText,v.date].filter(Boolean).join(' · ')));
       if(v.notes) row.append(el('p',v.notes,'software-notes'));
       if(v.sha256) {const detail=el('details');detail.append(el('summary','SHA-256 校验值'),el('code',v.sha256));row.append(detail);}
       rows.append(row);
     });
     if(!rows.children.length) rows.append(el('p','没有匹配的版本'));
+    pager.replaceChildren();if(pages>1){const prev=button('上一页',()=>{state.page--;draw();}),next=button('下一页',()=>{state.page++;draw();});prev.disabled=state.page===0;next.disabled=state.page===pages-1;pager.append(prev,el('span',`第 ${state.page+1} / ${pages} 页`),next);}
   }
-  search.oninput=draw;sort.onchange=draw;history.onchange=draw;draw();container.replaceChildren(panel);
+  function change(){state.query=search.value;state.sort=sort.value;state.history=history.checked;state.state=review.value;state.page=0;draw();}
+  search.oninput=change;sort.onchange=change;history.onchange=change;review.onchange=change;draw();container.replaceChildren(panel);
 };
 const originalTransferRender=render;
 render=function() {
