@@ -2,6 +2,10 @@ let TRANSFER_LIMITS = {upload:2147483648,download:8589934592,extensions:[]};
 let activeUpload = null;
 let queuePollRunning = false;
 let queueTasks = [];
+const queueViewState={filter:'all',query:'',page:0};
+const queueActionsPending=new Set();
+const queueGroups=[['all','全部'],['active','进行中'],['failed','失败'],['completed','已完成'],['cancelled','已取消']];
+function queueMatches(task,filter){return filter==='all'||(filter==='active'?['queued','downloading','cancelling','indexing'].includes(task.status):task.status===filter);}
 const versionSelection = new Set();
 let versionViewState={key:'',query:'',sort:'recommended',history:false,state:'all',page:0};
 const channelLabels = {stable:'稳定版',beta:'测试版',archive:'历史版'};
@@ -173,17 +177,32 @@ function renderQueue() {
   form.onsubmit=async e=>{e.preventDefault();submit.disabled=true;try{if(await transferApi('/api/admin/fetch',{url:url.value,name:name.value,filename:filename.value})){url.value='';filename.value='';showToast('已加入队列');await pollQueue();}}finally{submit.disabled=false;}};
   panel.append(form,el('p','单文件下载上限：'+bytes(TRANSFER_LIMITS.download)));
   const status=el('p');status.id='queueStatus';panel.append(status);
-  const rows=el('div');rows.id='downloadQueueRows';panel.append(rows);container.append(panel);drawQueue();
+  const filters=el('nav',undefined,'catalog-actions queue-filters');filters.id='queueFilters';filters.setAttribute('aria-label','下载任务状态');panel.append(filters);
+  const toolbar=el('div',undefined,'catalog-actions'),search=input(queueViewState.query);search.setAttribute('aria-label','搜索下载任务');search.placeholder='搜索文件名、软件或失败原因';
+  search.oninput=()=>{queueViewState.query=search.value;queueViewState.page=0;drawQueue();};
+  toolbar.append(search,button('重置任务筛选',()=>{queueViewState.filter='all';queueViewState.query='';queueViewState.page=0;search.value='';drawQueue();}));panel.append(toolbar);
+  const summary=el('p',undefined,'browse-summary');summary.id='queueSummary';summary.setAttribute('role','status');panel.append(summary);
+  const rows=el('div');rows.id='downloadQueueRows';panel.append(rows);container.append(panel);
+  const pager=el('nav',undefined,'browse-pagination');pager.id='queuePager';pager.setAttribute('aria-label','下载任务分页');panel.append(pager);drawQueue();
 }
 function drawQueue() {
-  const rows=document.getElementById('downloadQueueRows');if(!rows)return;rows.replaceChildren();
-  queueTasks.slice().reverse().forEach(task=> {
+  const rows=document.getElementById('downloadQueueRows');if(!rows)return;
+  const focusId=document.activeElement?.dataset.queueAction,focusControl=document.activeElement?.dataset.queueControl;
+  rows.replaceChildren();
+  const filters=document.getElementById('queueFilters');filters.replaceChildren();
+  queueGroups.forEach(([value,label])=>{const b=button(`${label} ${queueTasks.filter(t=>queueMatches(t,value)).length}`,()=>{queueViewState.filter=value;queueViewState.page=0;drawQueue();});b.dataset.queueControl=value;b.setAttribute('aria-pressed',String(queueViewState.filter===value));filters.append(b);});
+  const terms=queueViewState.query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const tasks=queueTasks.slice().reverse().filter(t=>queueMatches(t,queueViewState.filter)&&terms.every(q=>[t.filename,t.software,t.error].join(' ').toLowerCase().includes(q)));
+  if(queueViewState.filter==='all')tasks.sort((a,b)=>Number(queueMatches(b,'active'))-Number(queueMatches(a,'active')));
+  const pageSize=12,pages=Math.max(1,Math.ceil(tasks.length/pageSize));queueViewState.page=Math.min(queueViewState.page,pages-1);const start=queueViewState.page*pageSize;
+  document.getElementById('queueSummary').textContent=`共 ${tasks.length} 个匹配任务${tasks.length?` · 显示 ${start+1}–${Math.min(start+pageSize,tasks.length)}`:''} · 全部视图优先显示进行中任务`;
+  tasks.slice(start,start+pageSize).forEach(task=> {
     const row=el('article',undefined,'queue-task');
     const head=el('div',undefined,'catalog-actions');head.append(el('strong',task.filename||task.software||'下载任务'),el('span',taskLabels[task.status]||task.status));
-    const action=verb=>async()=>{if(await transferApi('/api/admin/downloads',{id:task.id,action:verb}))await pollQueue();};
-    if(['queued','downloading'].includes(task.status))head.append(button('取消',action('cancel')));
-    if(['failed','cancelled'].includes(task.status))head.append(button('重试',action('retry')));
-    if(['failed','cancelled','completed'].includes(task.status))head.append(button('移除记录',action('remove')));
+    const actionButton=(label,verb)=>{const b=button(label,async()=>{if(queueActionsPending.has(task.id))return;queueActionsPending.add(task.id);drawQueue();try{if(await transferApi('/api/admin/downloads',{id:task.id,action:verb}))await pollQueue();}finally{queueActionsPending.delete(task.id);drawQueue();}});b.dataset.queueAction=task.id+':'+verb;b.disabled=queueActionsPending.has(task.id);return b;};
+    if(['queued','downloading'].includes(task.status))head.append(actionButton('取消','cancel'));
+    if(['failed','cancelled'].includes(task.status))head.append(actionButton('重试','retry'));
+    if(['failed','cancelled','completed'].includes(task.status))head.append(actionButton('移除记录','remove'));
     row.append(head,el('p',task.sourceUrl||task.url,'queue-url'));
     if(task.provider)row.append(el('p',task.provider==='uu'?'已解析 UU 官方下载跳转':'已获取飞牛官方下载签名'));
     if(task.sync)row.append(el('p',task.unchanged?'官网同步：文件内容未变化':'官网同步：按发布审核设置入库，请到版本管理查看'));
@@ -191,10 +210,13 @@ function drawQueue() {
     if(task.total)progress.value=Math.min(task.bytes,task.total);else if(task.status!=='downloading')progress.value=task.status==='completed'?1:0;
     progress.setAttribute('aria-label','下载进度');row.append(progress);
     row.append(el('p',bytes(task.bytes)+(task.total?' / '+bytes(task.total):'')+(task.speed?' · '+bytes(task.speed)+'/秒':'')+' · 尝试 '+task.attempts+' 次'));
-    if(task.error)row.append(el('p',task.error,'transfer-error'));
+    if(task.error)row.append(el('p','失败原因：'+task.error,'transfer-error'));
     rows.append(row);
   });
-  if(!queueTasks.length)rows.append(el('p','暂无下载任务。在上方粘贴下载直链，或在软件管理中选择“下载留存”。'));
+  if(!tasks.length)rows.append(el('p',queueTasks.length?'没有匹配的任务，请切换状态或重置筛选。':'暂无下载任务。在上方粘贴下载直链，或在软件管理中选择“下载留存”。'));
+  const pager=document.getElementById('queuePager');if(pager){pager.replaceChildren();if(pages>1){const prev=button('上一页',()=>{queueViewState.page--;drawQueue();}),next=button('下一页',()=>{queueViewState.page++;drawQueue();});prev.dataset.queueControl='prev';next.dataset.queueControl='next';prev.disabled=queueViewState.page===0;next.disabled=queueViewState.page===pages-1;pager.append(prev,el('span',`第 ${queueViewState.page+1} / ${pages} 页`),next);}}
+  if(focusId)[...rows.querySelectorAll('button')].find(b=>b.dataset.queueAction===focusId)?.focus({preventScroll:true});
+  if(focusControl)[...document.querySelectorAll('[data-queue-control]')].find(b=>b.dataset.queueControl===focusControl)?.focus({preventScroll:true});
 }
 async function pollQueue() {
   if(queuePollRunning||SESSION?.role!=='admin')return;
