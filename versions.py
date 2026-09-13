@@ -1,5 +1,6 @@
 """Version annotations and logical grouping keyed by the original file path."""
 from catalog import text
+from urllib.parse import urlsplit
 
 
 def manage(config, scan_items, data):
@@ -10,6 +11,15 @@ def manage(config, scan_items, data):
     if not isinstance(paths, list) or not paths or any(not isinstance(p,str) or p not in known for p in paths):
         raise ValueError('请选择存在的版本文件')
     changes = {}
+    if 'cloudUrl' in data:
+        url=text(data['cloudUrl'],'115 分享链接',4096)
+        if url:
+            parsed=urlsplit(url)
+            if parsed.scheme!='https' or parsed.hostname not in ('115.com','115cdn.com','anxia.com') or parsed.username or parsed.password or parsed.port not in (None,443) or not parsed.path.startswith('/s/') or any(c in url for c in '\r\n'):
+                raise ValueError('请填写 HTTPS 的 115 分享链接（/s/ 开头），不要填写账号 Cookie 或临时下载地址')
+        changes['cloudUrl']=url
+    if 'cloudCode' in data:changes['cloudCode']=text(data['cloudCode'],'访问码',32)
+
     if 'software' in data:
         changes['software'] = text(data['software'], '软件名称', 200)
         if not changes['software']:

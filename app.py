@@ -54,7 +54,7 @@ SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-APP_VERSION = "11.5.0"
+APP_VERSION = "11.6.0"
 try:
     with open(os.path.join(os.path.dirname(__file__), 'build-info.json'), encoding='utf-8') as build_file:
         _build = json.load(build_file)
@@ -540,6 +540,9 @@ def build_software_list():
             "notes": version_cfg.get("notes", ""),
             "recommended": version_cfg.get("recommended", False),
             "reviewState": version_cfg.get("reviewState", ""),
+            "cloudProvider": "115" if version_cfg.get("cloudUrl") else "",
+            "cloudUrl": version_cfg.get("cloudUrl", ""),
+            "cloudCode": version_cfg.get("cloudCode", ""),
             "sha256": version_cfg.get("sha256", ""),
         })
 
@@ -1324,6 +1327,13 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
                     if os.path.normcase(os.path.realpath(os.path.join(version_base,version_rel)))==os.path.normcase(safe_path):
                         self.send_error(403,'Version is not published')
                         return
+            for version_path,settings in load_json(CONFIG_FILE,default_config()).get('versions',{}).items():
+                if not settings.get('cloudUrl'):continue
+                version_base=UPLOAD_DIR if version_path.startswith(UPLOAD_URL_PREFIX) else ROOT_DIR
+                version_rel=version_path[len(UPLOAD_URL_PREFIX):] if version_path.startswith(UPLOAD_URL_PREFIX) else version_path
+                if os.path.normcase(os.path.realpath(os.path.join(version_base,version_rel)))==os.path.normcase(safe_path):
+                    self._serve_json({'success':False,'error':'此版本已切换到 115，请在软件详情领取网盘链接'},status=403)
+                    return
             if os.path.isfile(safe_path):
                 meter = get_traffic()
                 try:
@@ -1384,6 +1394,8 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             if not session or session.get('role')!='admin':
                 for sw in sw_list:
                     sw['versions']=[v for v in sw['versions'] if v.get('reviewState') not in ('pending','rejected')]
+                    for v in sw['versions']:
+                        v.pop('cloudUrl',None);v.pop('cloudCode',None)
                 sw_list=[sw for sw in sw_list if sw['versions'] or sw.get('downloadUrl')]
             self._serve_json({"success": True, "data": sw_list, "categories": nodes, "limits": {"upload": MAX_UPLOAD_SIZE, "download": MAX_DOWNLOAD_SIZE, "extensions": list(SUPPORTED_EXTENSIONS)}})
             return
@@ -1416,6 +1428,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == '/api/config':
+            if not self._require_auth('admin'):return
             config = load_json(CONFIG_FILE, default_config())
             self._serve_json(config)
             return
@@ -1429,6 +1442,24 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
 
+        if path == '/api/cloud-download':
+            session=self._require_auth()
+            if not session:return
+            try:
+                with _config_lock:
+                    session=self._get_session()
+                    if not session or not session.get('canDownload',True):raise ValueError('账号无下载权限')
+                    data=self._read_body()
+                    if not isinstance(data,dict):raise ValueError('领取请求格式无效')
+                    selected=next((v for sw in build_software_list() for v in sw['versions'] if v['path']==data.get('path')),None)
+                    if not selected or not selected.get('cloudUrl'):raise ValueError('网盘来源不存在，请刷新')
+                    if selected.get('reviewState') in ('pending','rejected') and session['role']!='admin':raise ValueError('此版本尚未发布')
+                    claim_id=data.get('claimId')
+                    if claim_id is not None and (not isinstance(claim_id,str) or not re.fullmatch('[a-zA-Z0-9-]{8,64}',claim_id)):raise ValueError('领取请求标识无效')
+                    get_traffic().claim_cloud(session,selected['filename'],selected['size'],claim_id,selected['path'])
+                    self._serve_json({'success':True,'url':selected['cloudUrl'],'code':selected.get('cloudCode',''),'charged':selected['size']})
+            except (ValueError,TypeError) as exc:self._serve_json({'success':False,'error':str(exc)},status=403)
+            return
         if path == '/api/admin/update':
             if not self._require_auth('admin'): return
             try:

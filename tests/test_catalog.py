@@ -187,6 +187,24 @@ class CatalogIntegrationTests(unittest.TestCase):
         _,body=self.fetch_status('/api/admin/email-settings')
         self.assertFalse(json.loads(body)['success'])
 
+    def test_cloud_source_claim_is_private_and_blocks_local_fallback(self):
+        path='windows.iso';url='https://115cdn.com/s/example'
+        _,body=self.fetch_status('/api/admin/versions',self.token,'POST',{'paths':[path],'cloudUrl':url,'cloudCode':'abcd'})
+        self.assertTrue(json.loads(body)['success'])
+        app.create_user('reader','test-password');reader=app.create_session('reader','user')
+        _,body=self.fetch_status('/api/software',reader)
+        version=next(v for sw in json.loads(body)['data'] for v in sw['versions'] if v['path']==path)
+        self.assertEqual(version['cloudProvider'],'115');self.assertNotIn('cloudUrl',version)
+        self.assertEqual(self.fetch_status('/download/windows.iso',reader)[0],403)
+        _,body=self.fetch_status('/api/cloud-download',reader,'POST',{'path':path})
+        result=json.loads(body);self.assertTrue(result['success']);self.assertEqual(result['url'],url)
+        self.assertEqual(app.get_traffic().snapshot('reader')['used'],len(b'windows test'))
+        self.fetch_status('/api/users/reader',self.token,'PUT',{'canDownload':False})
+        _,body=self.fetch_status('/api/cloud-download',reader,'POST',{'path':path})
+        self.assertFalse(json.loads(body)['success'])
+        self.fetch_status('/api/admin/versions',self.token,'POST',{'paths':[path],'cloudUrl':''})
+        self.assertEqual(self.fetch_status('/download/windows.iso',self.token)[0],200)
+
     def test_traffic_settings_and_download_meter(self):
         app.create_user('reader', 'secret')
         token = app.create_session('reader', 'user')
@@ -206,7 +224,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         _, logs = self.fetch_status('/api/admin/traffic', self.token)
         self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
         _, version = self.fetch_status('/api/version')
-        self.assertEqual(json.loads(version)['version'],'11.5.0')
+        self.assertEqual(json.loads(version)['version'],'11.6.0')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')

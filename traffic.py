@@ -21,6 +21,8 @@ class Traffic:
             db.executescript('''
                 CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, value TEXT);
                 CREATE TABLE IF NOT EXISTS usage (day TEXT, username TEXT, bytes INTEGER, PRIMARY KEY(day,username));
+                CREATE TABLE IF NOT EXISTS cloud_receipts(username TEXT,claim_id TEXT,filename TEXT,size INTEGER,created REAL,PRIMARY KEY(username,claim_id));
+                CREATE TABLE IF NOT EXISTS cloud_claims(day TEXT,username TEXT,claims INTEGER,PRIMARY KEY(day,username));
                 CREATE TABLE IF NOT EXISTS downloads (id INTEGER PRIMARY KEY, username TEXT, filename TEXT, started REAL, finished REAL, bytes INTEGER DEFAULT 0, status TEXT);
                 UPDATE downloads SET status='interrupted', finished=strftime('%s','now') WHERE status='active';
             ''')
@@ -79,6 +81,28 @@ class Traffic:
             self.active[name] = self.active.get(name, 0) + 1
             return ident
 
+    def claim_cloud(self,user,filename,size,claim_id=None,resource=None):
+        resource=resource or filename
+        if type(size) is not int or size<=0:raise ValueError('文件大小未知，暂不能领取网盘链接')
+        with self.lock,self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            day=self.day();name=user['username'];quota=self.quota(user,self.settings())
+            if claim_id:
+                prior=db.execute('SELECT filename,size FROM cloud_receipts WHERE username=? AND claim_id=?',(name,claim_id)).fetchone()
+                if prior:
+                    if prior[0]!=resource or prior[1]!=size:raise ValueError('领取请求已变化，请重新打开窗口')
+                    return
+            row=db.execute('SELECT bytes FROM usage WHERE day=? AND username=?',(day,name)).fetchone()
+            used=row[0] if row else 0
+            if quota and used+size>quota:raise ValueError('今日剩余额度不足以领取此文件')
+            db.execute('INSERT INTO usage VALUES (?,?,?) ON CONFLICT(day,username) DO UPDATE SET bytes=bytes+excluded.bytes',(day,name,size))
+            db.execute('INSERT INTO cloud_claims VALUES (?,?,1) ON CONFLICT(day,username) DO UPDATE SET claims=claims+1',(day,name))
+            now=time.time()
+            if claim_id:db.execute('INSERT INTO cloud_receipts VALUES (?,?,?,?,?)',(name,claim_id,resource,size,now))
+            db.execute('DELETE FROM cloud_receipts WHERE created<?',(now-7*86400,))
+            db.execute("INSERT INTO downloads(username,filename,started,finished,bytes,status) VALUES (?,?,?,?,?,'cloud_link')",(name,filename,now,now,size))
+            db.execute("DELETE FROM downloads WHERE status!='active' AND id NOT IN (SELECT id FROM downloads ORDER BY id DESC LIMIT 1000)")
+
     def reserve(self, ident, user, size):
         # Reserve before sending: concurrent requests and process restarts cannot bypass quota.
         with self.lock, self.db() as db:
@@ -120,7 +144,7 @@ class Traffic:
 
     def snapshot(self, username=None):
         with self.db() as db:
-            usage = [dict(row) for row in db.execute('SELECT username,bytes FROM usage WHERE day=? ORDER BY bytes DESC', (self.day(),))]
+            usage = [dict(row) for row in db.execute('SELECT usage.username,usage.bytes,COALESCE(cloud_claims.claims,0) AS cloudClaims FROM usage LEFT JOIN cloud_claims ON usage.day=cloud_claims.day AND usage.username=cloud_claims.username WHERE usage.day=? ORDER BY usage.bytes DESC', (self.day(),))]
             if username is not None:
                 return {'day': self.day(), 'used': next((r['bytes'] for r in usage if r['username']==username),0), 'settings':self.settings()}
             records = [dict(row) for row in db.execute('SELECT * FROM downloads ORDER BY id DESC LIMIT 100')]

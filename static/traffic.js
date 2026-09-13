@@ -35,12 +35,12 @@ async function renderTraffic(panel){
       const body={adminExempt:exempt.checked};for(const [key,field] of Object.entries(fields))body[key]=Number(field.value);
       const r=await api('/api/admin/traffic',{method:'PUT',body});showToast(r.success?'下载设置已保存':r.error||'保存失败');
     }catch(e){showToast('保存失败，请检查网络');}finally{save.disabled=false;}};
-    panel.append(el('h3','今日用量 · '+data.day+'（北京时间）'));
-    for(const row of data.usage)panel.append(el('p',row.username+'：'+bytes(row.bytes)));
+    panel.append(el('h3','今日额度用量 · '+data.day+'（北京时间）'));
+    for(const row of data.usage)panel.append(el('p',row.username+'：'+bytes(row.bytes)+' · 115 领取 '+(row.cloudClaims||0)+' 次'));
     if(!data.usage.length)panel.append(el('p','今天尚无下载流量'));
     panel.append(button('刷新用量与记录',()=>renderTraffic(panel)),el('h3','最近 100 条下载记录'));
-    panel.append(el('p','流量按服务器提交发送的字节计入；网络中断或进程异常时，最多一个预留数据块可能未到达客户端，仍计入额度。'));
-    const labels={completed:'完成',active:'下载中',interrupted:'中断',quota:'额度耗尽',revoked:'权限已撤销'};
+    panel.append(el('p','本地按服务器提交发送的字节计入；115 按领取文件的完整大小计入，并非实际传输量。网络中断或进程异常时，最多一个预留数据块可能未到达客户端，仍计入额度。'));
+    const labels={cloud_link:'115 链接领取（按文件大小计额）',completed:'完成',active:'下载中',interrupted:'中断',quota:'额度耗尽',revoked:'权限已撤销'};
     const rows=el('div');panel.append(rows);
     for(const record of data.records){
       const item=el('div',undefined,'traffic-record');item.append(el('strong',record.filename),el('p',`${record.username} · ${bytes(record.bytes)} · ${labels[record.status]||record.status}`),el('small',new Date(record.started*1000).toLocaleString()));rows.append(item);
@@ -51,5 +51,5 @@ async function renderTraffic(panel){
 const headerBeforeTraffic=renderHeaderBtns;
 renderHeaderBtns=function(){headerBeforeTraffic();if(SESSION)document.getElementById('headerBtns').append(button('我的流量',async()=>{
   const form=modal('我的下载额度');const text=el('p','正在读取…');form.append(text);
-  try{const r=await api('/api/my-traffic');if(!r.success)throw Error(r.error||'读取失败');const exempt=SESSION.role==='admin'&&r.settings.adminExempt;text.textContent=`${r.day}（北京时间）已用 ${bytes(r.used)}；每日额度：${exempt||!r.settings.dailyMiB?'不限':bytes(r.settings.dailyMiB*1048576)}。`;}catch(e){text.textContent=e.message;}
+  try{const r=await api('/api/my-traffic');if(!r.success)throw Error(r.error||'读取失败');const exempt=SESSION.role==='admin'&&r.settings.adminExempt;text.textContent=`${r.day}（北京时间，本地发送＋网盘领取）已用 ${bytes(r.used)}；每日额度：${exempt||!r.settings.dailyMiB?'不限':bytes(r.settings.dailyMiB*1048576)}。`;}catch(e){text.textContent=e.message;}
 }));};

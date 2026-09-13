@@ -120,11 +120,12 @@ renderVersionPage=function(container) {
       if(v.reviewState==='pending')head.append(el('strong','待审核'));
       if(v.reviewState==='rejected')head.append(el('strong','已拒绝'));
       head.append(el('strong',(v.recommended?'★ 推荐 · ':'')+(v.version||v.filename)));
-      const download=el('a','下载','btn btn-download');download.href='/download/'+encodeURIComponent(v.path);download.download=v.filename;head.append(download);
+      if(v.cloudProvider==='115')head.append(button('115 网盘下载',()=>claimCloudDownload(v)));
+      else {const download=el('a','下载','btn btn-download');download.href='/download/'+encodeURIComponent(v.path);download.download=v.filename;head.append(download);}
       if(admin&&v.reviewState==='rejected')head.append(button('重新审核',()=>reviewVersion(v,'reopen')));
       if(admin&&v.reviewState==='pending')head.append(button('批准发布',()=>reviewVersion(v,'approve')),button('拒绝发布',()=>reviewVersion(v,'reject')));
       if(admin&&v.channel==='archive'&&!['pending','rejected'].includes(v.reviewState))head.append(button('回退到此版本',()=>reviewVersion(v,'rollback')));
-      if(admin) head.append(button('编辑版本',()=>editVersion(sw,v)),button('移动版本',()=>moveVersions([v.path],sw.name)));
+      if(admin) head.append(button('下载来源',()=>editDownloadSource(v)),button('编辑版本',()=>editVersion(sw,v)),button('移动版本',()=>moveVersions([v.path],sw.name)));
       row.append(head,el('div',v.filename,'version-path'),el('p',[channelLabels[v.channel]||'稳定版',v.platform,v.arch,v.sizeText,v.date].filter(Boolean).join(' · ')));
       if(v.notes) row.append(el('p',v.notes,'software-notes'));
       if(v.sha256) {const detail=el('details');detail.append(el('summary','SHA-256 校验值'),el('code',v.sha256));row.append(detail);}
@@ -245,4 +246,30 @@ function reviewVersion(version,action){
   const label={approve:'批准发布',reject:'拒绝发布',rollback:'回退到此版本',reopen:'重新审核'}[action];
   const form=modal(label);form.append(el('p',version.filename),el('p',action==='reopen'?'此版本恢复为待审核，批准前仍不对普通用户发布。':action==='reject'?'该文件保留给管理员查看，不对普通用户发布。':'此版本将设为推荐，其他已发布版本保留为历史版本，不删除文件。'));
   actions(form,()=>saveVersion({action,paths:[version.path]}),label);
+}
+
+function editDownloadSource(version){
+  const form=modal('下载来源');form.append(el('p',version.filename));
+  const source=el('select');source.add(new Option('本地文件','local'));source.add(new Option('115 免登录分享','115'));source.value=version.cloudProvider||'local';field(form,'文件下载来源',source);
+  const url=field(form,'115 分享链接',input(version.cloudUrl||'',4096));url.type='url';
+  const code=field(form,'分享访问码（可选）',input(version.cloudCode||'',32));
+  const change=()=>{url.required=source.value==='115';url.disabled=code.disabled=source.value!=='115';};source.onchange=change;change();
+  form.append(el('p','请先将相同文件上传到 115，并开启免登录分享。本站仅跳转分享页面，不借用会员 Cookie，不转发文件。切换不会删除本地文件。'));
+  actions(form,()=>saveVersion({paths:[version.path],cloudUrl:source.value==='115'?url.value:'',cloudCode:source.value==='115'?code.value:''}));
+}
+function claimCloudDownload(version){
+  if(!SESSION){showLogin();return;}
+  const claimId=Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+  const form=modal('领取 115 下载链接');form.append(el('p',version.filename),el('p',`领取一次按 ${bytes(version.size)} 计入今日额度，即使未下载或分享失效也不会自动退回。后续传输由 115 处理，本站无法测量或限制实际下载速度。`));
+  const claim=button('确认领取',async()=>{
+    claim.disabled=true;
+    try{
+      const result=await api('/api/cloud-download',{method:'POST',body:{path:version.path,claimId}});
+      if(!result.success){showToast(result.error||'领取失败');claim.disabled=false;return;}
+      claim.remove();form.append(el('p','已计入额度：'+bytes(result.charged)));
+      if(result.code)form.append(el('p','访问码：'+result.code));
+      const link=el('a','打开 115 下载页面','btn btn-primary');link.href=result.url;link.target='_blank';link.rel='noopener noreferrer';form.append(link);
+      form.append(el('p','请在此窗口内打开链接；关闭后重新领取会再次计入额度。'));
+    }catch(e){showToast('请求未确认，请在此窗口重试；重复请求不会再次扣额');claim.textContent='重试领取';claim.disabled=false;}
+  });form.append(claim);
 }
