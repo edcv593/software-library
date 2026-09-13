@@ -157,6 +157,19 @@ class CatalogIntegrationTests(unittest.TestCase):
         self.assertTrue(app.verify_user('test-admin','old')[0])
         self.assertTrue(app.find_user('test-admin')['password'].startswith('pbkdf2_sha256$'))
 
+    def test_personal_traffic_cannot_select_another_account(self):
+        app.create_user('quota-reader','reader-password','user')
+        token=app.create_session('quota-reader','user')
+        meter=app.get_traffic()
+        meter.claim_cloud({'username':'test-admin','role':'admin'},'private-file.exe',100)
+        meter.claim_cloud({'username':'quota-reader','role':'user'},'own-file.exe',10)
+        _,body=self.fetch_status('/api/my-traffic?username=test-admin',token)
+        result=json.loads(body)
+        self.assertEqual(result['used'],10)
+        self.assertEqual([r['filename'] for r in result['records']],['own-file.exe'])
+        _,body=self.fetch_status('/api/my-traffic')
+        self.assertFalse(json.loads(body)['success'])
+
     def test_email_signup_binding_and_password_reset(self):
         from unittest.mock import patch
         service=app.get_email_signup()
@@ -230,7 +243,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         _, logs = self.fetch_status('/api/admin/traffic', self.token)
         self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
         _, version = self.fetch_status('/api/version')
-        self.assertEqual(json.loads(version)['version'],'11.12.0')
+        self.assertEqual(json.loads(version)['version'],'11.13.0')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')

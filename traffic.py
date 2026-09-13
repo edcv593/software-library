@@ -143,9 +143,20 @@ class Traffic:
                 db.execute("DELETE FROM usage WHERE day < ?", ((datetime.now(timezone(timedelta(hours=8)))-timedelta(days=90)).strftime('%Y-%m-%d'),))
 
     def snapshot(self, username=None):
-        with self.db() as db:
-            usage = [dict(row) for row in db.execute('SELECT usage.username,usage.bytes,COALESCE(cloud_claims.claims,0) AS cloudClaims FROM usage LEFT JOIN cloud_claims ON usage.day=cloud_claims.day AND usage.username=cloud_claims.username WHERE usage.day=? ORDER BY usage.bytes DESC', (self.day(),))]
+        with self.lock, self.db() as db:
+            day = self.day()
+            usage = [dict(row) for row in db.execute('SELECT usage.username,usage.bytes,COALESCE(cloud_claims.claims,0) AS cloudClaims FROM usage LEFT JOIN cloud_claims ON usage.day=cloud_claims.day AND usage.username=cloud_claims.username WHERE usage.day=? ORDER BY usage.bytes DESC', (day,))]
             if username is not None:
-                return {'day': self.day(), 'used': next((r['bytes'] for r in usage if r['username']==username),0), 'settings':self.settings()}
+                records = [dict(row) for row in db.execute('SELECT id,filename,started,finished,bytes,status FROM downloads WHERE username=? ORDER BY id DESC LIMIT 20', (username,))]
+                return {'day': day, 'used': next((r['bytes'] for r in usage if r['username']==username),0), 'settings':self.settings(), 'records':records, 'activeDownloads':self.active.get(username,0)}
             records = [dict(row) for row in db.execute('SELECT * FROM downloads ORDER BY id DESC LIMIT 100')]
-            return {'day':self.day(), 'settings':self.settings(), 'usage':usage, 'records':records}
+            return {'day':day, 'settings':self.settings(), 'usage':usage, 'records':records}
+
+    def personal_snapshot(self, user):
+        result = self.snapshot(user['username'])
+        settings = result['settings']
+        limit = self.quota(user, settings)
+        result.update(dailyLimit=limit, remaining=max(0, limit-result['used']) if limit else None,
+                      exempt=self.exempt(user, settings), downloadAllowed=user.get('canDownload', True),
+                      concurrencyLimit=0 if self.exempt(user, settings) else settings['concurrency'])
+        return result

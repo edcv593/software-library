@@ -49,7 +49,29 @@ async function renderTraffic(panel){
   }catch(e){message.textContent='读取失败：'+e.message;panel.append(button('重试',()=>renderTraffic(panel)));}
 }
 const headerBeforeTraffic=renderHeaderBtns;
-renderHeaderBtns=function(){headerBeforeTraffic();if(SESSION)document.getElementById('headerBtns').append(button('我的流量',async()=>{
-  const form=modal('我的下载额度');const text=el('p','正在读取…');form.append(text);
-  try{const r=await api('/api/my-traffic');if(!r.success)throw Error(r.error||'读取失败');const exempt=SESSION.role==='admin'&&r.settings.adminExempt;text.textContent=`${r.day}（北京时间，本地发送＋网盘领取）已用 ${bytes(r.used)}；每日额度：${exempt||!r.settings.dailyMiB?'不限':bytes(r.settings.dailyMiB*1048576)}。`;}catch(e){text.textContent=e.message;}
-}));};
+renderHeaderBtns=function(){headerBeforeTraffic();if(SESSION)document.getElementById('headerBtns').append(button('我的额度',showMyTraffic));};
+function showMyTraffic(){
+  if(!SESSION){showLogin();return;}
+  const form=modal('我的下载额度'),content=el('div');form.append(content);
+  const refresh=button('刷新额度与记录',load),close=button('关闭',closeModal);form.append(refresh,close);
+  const token=SESSION.token;
+  async function load(){
+    refresh.disabled=true;content.replaceChildren(el('p','正在读取…'));
+    try{
+      const r=await api('/api/my-traffic');if(!form.isConnected||SESSION?.token!==token)return;if(!r.success)throw Error(r.error||'读取失败');
+      content.replaceChildren(el('p',`${r.day} · 每日北京时间零点重置`));
+      content.append(el('p',r.downloadAllowed?'账号下载权限：已允许':'账号下载权限：已暂停，请联系管理员',r.downloadAllowed?'':'transfer-error'));
+      const amount=el('div',undefined,'quota-summary');amount.append(el('strong',r.remaining===null?'今日额度不限':'今日剩余 '+bytes(r.remaining)),el('p',`今日已用 ${bytes(r.used)}${r.dailyLimit?' / '+bytes(r.dailyLimit):''}`));content.append(amount);
+      if(r.dailyLimit){const progress=el('progress');progress.max=r.dailyLimit;progress.value=Math.min(r.used,r.dailyLimit);progress.setAttribute('aria-label','今日额度使用比例');content.append(progress);if(r.remaining===0)content.append(el('p','今日额度已用完，请等待重置或联系管理员。','transfer-error'));}
+      content.append(el('p',`当前本站下载 ${r.activeDownloads} 个 · 同时下载上限：${r.concurrencyLimit||'不限'}`));
+      content.append(el('p',r.exempt?'管理员额度、并发和限速豁免已生效。':r.settings.speedKiB?`本站总下载速度上限 ${bytes(r.settings.speedKiB*1024)}/秒，由所有受限账号共享。`:'本站未设置总下载速度上限。'));
+      content.append(el('p','本地按服务器提交发送的字节计入；115 领取按文件完整大小计额，并非实际下载量。115 下载速度和传输并发不由本站控制。'));
+      content.append(el('h3','我的最近 20 条记录'));
+      const labels={cloud_link:'115 链接领取',completed:'完成',active:'下载中',interrupted:'中断',quota:'额度耗尽',revoked:'权限已撤销'};
+      for(const record of r.records){const row=el('div',undefined,'traffic-record');row.append(el('strong',record.filename),el('p',`${bytes(record.bytes)} · ${labels[record.status]||record.status}`),el('small',new Date(record.started*1000).toLocaleString()));content.append(row);}
+      if(!r.records.length)content.append(el('p','暂无下载记录'));
+    }catch(e){if(form.isConnected)content.replaceChildren(el('p','读取失败：'+e.message));}
+    finally{if(form.isConnected)refresh.disabled=false;}
+  }
+  load();
+}

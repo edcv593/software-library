@@ -54,7 +54,7 @@ SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-APP_VERSION = "11.12.0"
+APP_VERSION = "11.13.0"
 try:
     with open(os.path.join(os.path.dirname(__file__), 'build-info.json'), encoding='utf-8') as build_file:
         _build = json.load(build_file)
@@ -1383,7 +1383,7 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         if path == '/api/my-traffic':
             session = self._require_auth()
             if not session: return
-            self._serve_json({'success':True, **get_traffic().snapshot(session['username'])})
+            self._serve_json({'success':True, **get_traffic().personal_snapshot(session)})
             return
         if path == '/api/software':
             with _config_lock:

@@ -11,6 +11,29 @@ class TrafficTests(unittest.TestCase):
         self.user={'username':'reader','role':'user'}
     def tearDown(self):self.tmp.cleanup()
     def configure(self,**values):self.meter.configure({**traffic.DEFAULTS,**values})
+    def test_personal_records_are_private_and_limited(self):
+        other={'username':'other','role':'user'}
+        self.meter.claim_cloud(other,'private.exe',100)
+        for index in range(25):self.meter.claim_cloud(self.user,f'file{index}.exe',10)
+        snap=self.meter.personal_snapshot(self.user)
+        self.assertEqual(len(snap['records']),20)
+        self.assertEqual(snap['records'][0]['filename'],'file24.exe')
+        self.assertTrue(all(r['filename']!='private.exe' and 'username' not in r for r in snap['records']))
+        self.assertEqual(snap['used'],250)
+        self.assertIsNone(snap['remaining'])
+    def test_personal_effective_limits_and_active_downloads(self):
+        self.configure(dailyMiB=1,concurrency=2,adminExempt=True)
+        ident=self.meter.start(self.user,'active.exe')
+        self.meter.reserve(ident,self.user,100)
+        snap=self.meter.personal_snapshot({**self.user,'canDownload':False})
+        self.assertEqual(snap['remaining'],1048576-100)
+        self.assertEqual(snap['activeDownloads'],1)
+        self.assertFalse(snap['downloadAllowed'])
+        self.assertEqual(snap['concurrencyLimit'],2)
+        admin=self.meter.personal_snapshot({'username':'admin','role':'admin'})
+        self.assertTrue(admin['exempt']);self.assertIsNone(admin['remaining']);self.assertEqual(admin['concurrencyLimit'],0)
+        self.meter.finish(ident,self.user,'completed')
+        self.assertEqual(self.meter.personal_snapshot(self.user)['activeDownloads'],0)
     def test_quota_atomic_and_persistent(self):
         self.configure(dailyMiB=1)
         ident=self.meter.start(self.user,'file.iso')
