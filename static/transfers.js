@@ -250,12 +250,13 @@ function reviewVersion(version,action){
 
 function editDownloadSource(version){
   const form=modal('下载来源');form.append(el('p',version.filename));
-  const source=el('select');source.add(new Option('本地文件','local'));source.add(new Option('115 免登录分享','115'));source.value=version.cloudProvider||'local';field(form,'文件下载来源',source);
-  const url=field(form,'115 分享链接',input(version.cloudUrl||'',4096));url.type='url';
-  const code=field(form,'分享访问码（可选）',input(version.cloudCode||'',32));
+  const source=el('select');source.add(new Option('本地文件','local'));source.add(new Option('115 分享页面','115'));source.value=version.cloudProvider||'local';field(form,'文件下载来源',source);
+  const url=el('textarea');url.value=version.cloudUrl||'';url.maxLength=8192;url.rows=3;url.placeholder='粘贴从 115 复制的整段分享文字，或填写分享链接';field(form,'115 分享内容',url);
+  const code=field(form,'访问码（留空自动识别，填写则优先使用）',input(version.cloudCode||'',32));
+  url.addEventListener('input',()=>{code.value='';});
   const change=()=>{url.required=source.value==='115';url.disabled=code.disabled=source.value!=='115';};source.onchange=change;change();
-  form.append(el('p','请先将相同文件上传到 115，并开启免登录分享。本站仅跳转分享页面，不借用会员 Cookie，不转发文件。切换不会删除本地文件。'));
-  actions(form,()=>saveVersion({paths:[version.path],cloudUrl:source.value==='115'?url.value:'',cloudCode:source.value==='115'?code.value:''}));
+  form.append(el('p','保存时自动提取链接和访问码。请确认分享文件与此版本一致；能否免登录由 115 的分享设置决定。切换不会删除本地文件。'));
+  actions(form,()=>saveVersion(source.value==='115'?{paths:[version.path],cloudShare:url.value,cloudCode:code.value}:{paths:[version.path],cloudUrl:'',cloudCode:''}));
 }
 function claimCloudDownload(version){
   if(!SESSION){showLogin();return;}

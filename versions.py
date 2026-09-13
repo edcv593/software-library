@@ -1,6 +1,31 @@
 """Version annotations and logical grouping keyed by the original file path."""
 from catalog import text
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, parse_qs, urlencode
+import re
+
+
+def parse_cloud_share(value, explicit_code=''):
+    """Normalize pasted share text without fetching any user supplied URL."""
+    value = text(value, '115 分享内容', 8192)
+    code = text(explicit_code, '访问码', 32)
+    matches = re.findall(r'https://(?:115cdn\.com|115\.com|anxia\.com)/s/([A-Za-z0-9]+)(?=[?#\s<>\]\)]|$)(?:\?([^\s#<>\]\)]+))?', value)
+    if not matches:
+        raise ValueError('未识别到有效的 115 分享链接，请粘贴完整分享内容')
+    links = set()
+    codes = set()
+    for ident, query in matches:
+        links.add(ident)
+        for found in parse_qs(query).get('password', []):
+            if re.fullmatch(r'[A-Za-z0-9]{1,32}', found): codes.add(found)
+    codes.update(re.findall(r'(?:访问码|提取码)\s*[:：]\s*([A-Za-z0-9]{1,32})(?![A-Za-z0-9])', value))
+    if len(links) != 1:
+        raise ValueError('检测到多个分享链接，请每次只填写一个文件的分享')
+    if not code and len(codes) > 1:
+        raise ValueError('分享内容中的访问码不一致，请在访问码栏填写正确值')
+    code = code or next(iter(codes), '')
+    url = 'https://115cdn.com/s/' + next(iter(links))
+    if code: url += '?' + urlencode({'password': code})
+    return url, code
 
 
 def manage(config, scan_items, data):
@@ -11,6 +36,9 @@ def manage(config, scan_items, data):
     if not isinstance(paths, list) or not paths or any(not isinstance(p,str) or p not in known for p in paths):
         raise ValueError('请选择存在的版本文件')
     changes = {}
+    if 'cloudShare' in data:
+        data = dict(data)
+        data['cloudUrl'], data['cloudCode'] = parse_cloud_share(data['cloudShare'], data.get('cloudCode', ''))
     if 'cloudUrl' in data:
         url=text(data['cloudUrl'],'115 分享链接',4096)
         if url:

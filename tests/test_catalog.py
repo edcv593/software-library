@@ -224,7 +224,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         _, logs = self.fetch_status('/api/admin/traffic', self.token)
         self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
         _, version = self.fetch_status('/api/version')
-        self.assertEqual(json.loads(version)['version'],'11.6.0')
+        self.assertEqual(json.loads(version)['version'],'11.6.1')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')
