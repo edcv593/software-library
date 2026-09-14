@@ -9,7 +9,7 @@ renderAdmin=function(container){
   }
   if(adminSection==='system'){
     const backup=el('section',undefined,'admin-section');container.append(backup);
-    backup.append(el('h3','管理资料备份'),el('p','导出分类、软件资料、版本设置和当前文件清单，便于整理前存档。'),button('导出资料备份',exportCatalog));
+    backup.append(el('h3','管理资料备份'),el('p','导出分类、软件资料、版本设置和当前文件清单，便于整理前存档。'),button('导出资料备份',exportCatalog),button('校验备份与预览差异',previewCatalog));
     const panel=el('section',undefined,'admin-section');container.append(panel);
     panel.append(el('h3','版本与更新'));
     const info=el('p','正在读取版本…');panel.append(info);
@@ -20,6 +20,24 @@ renderAdmin=function(container){
     }));
   }
 };
+function previewCatalog(){
+  const form=modal('备份校验与差异预览');form.append(el('p','选择本站导出的 JSON 资料备份（最大 8 MiB）。仅比较资料和扫描清单，不会覆盖配置或移动文件。'));
+  const file=el('input');file.type='file';file.accept='.json,application/json';file.required=true;file.setAttribute('aria-label','选择资料备份');form.append(file);
+  const result=el('div');result.setAttribute('aria-live','polite');form.append(result);file.onchange=()=>result.replaceChildren();
+  actions(form,async()=>{
+    const selected=file.files[0];if(!selected)return;if(selected.size>8*1024*1024){result.replaceChildren(el('p','文件超过 8 MiB，请选择较小的资料备份。'));return;}
+    file.disabled=true;result.replaceChildren(el('p','正在校验与比较…'));
+    try{
+      const backup=JSON.parse(await selected.text());const r=await api('/api/admin/catalog-preview',{method:'POST',body:backup});if(!form.isConnected)return;if(!r.success)throw Error(r.error||'校验失败');const p=r.preview;
+      result.replaceChildren(el('p',`结构校验通过 · 备份版本 ${p.appVersion} · ${p.createdAt}`),el('p',`备份：${p.counts.categories} 分类 / ${p.counts.software} 软件 / ${p.counts.files} 文件；当前：${p.currentCounts.categories} 分类 / ${p.currentCounts.software} 软件 / ${p.currentCounts.files} 文件。`));
+      for(const [key,label] of [['categories','分类资料'],['software','自定义软件设置'],['versions','版本设置'],['files','文件清单（按路径和大小）']]){
+        const section=el('section');section.append(el('h3',label));
+        for(const [kind,title] of [['backupOnly','仅在备份中'],['currentOnly','仅在当前资料中'],['changed','内容不同']]){const group=p[key][kind],detail=el('details');detail.append(el('summary',`${title}：${group.count} 项`));if(group.count){const list=el('ul');group.items.forEach(item=>list.append(el('li',item)));detail.append(list);if(group.count>group.items.length)detail.append(el('p','仅展示前 100 项'));}section.append(detail);}result.append(section);
+      }
+      result.append(el('p','文件清单差异仅依据当前扫描结果和文件大小，不代表文件内容校验；资料未被修改。'));
+    }catch(e){result.replaceChildren(el('p','校验失败：'+e.message));}finally{file.disabled=false;}
+  },'校验并预览');
+}
 function exportCatalog(){
   const form=modal('导出管理资料');
   form.append(el('p','包含分类树、自定义资料、版本备注、官网下载设置、115 分享链接及访问码和当前文件清单。'),el('p','这是资料存档，不包含安装包、用户账号、SMTP 设置或流量记录。完整站点备份仍需保存 Docker 数据目录和软件目录。当前版本提供导出，尚未提供一键导入恢复。'));

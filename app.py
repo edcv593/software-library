@@ -54,7 +54,7 @@ SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-APP_VERSION = "11.14.0"
+APP_VERSION = "11.15.0"
 try:
     with open(os.path.join(os.path.dirname(__file__), 'build-info.json'), encoding='utf-8') as build_file:
         _build = json.load(build_file)
@@ -1451,6 +1451,19 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
 
+        if path == '/api/admin/catalog-preview':
+            if not self._require_auth('admin'): return
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if length <= 0 or length > 10 * 1024 * 1024: raise ValueError('备份请求为空或超过 10 MiB')
+                backup = self._read_body()
+                with _config_lock:
+                    current = catalog.export_data(load_json(CONFIG_FILE, default_config()), build_software_list(), APP_VERSION, '')
+                    result = catalog.compare_export(backup, current)
+                self._serve_json({'success': True, 'preview': result}, private=True)
+            except (ValueError, TypeError, UnicodeError, RecursionError):
+                self._serve_json({'success':False,'error':'备份格式无效、结构不完整或超出限制，请使用本站导出的 JSON 文件'}, status=400, private=True)
+            return
         if path == '/api/cloud-download':
             session=self._require_auth()
             if not session:return

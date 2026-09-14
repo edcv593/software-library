@@ -35,6 +35,65 @@ def categories(config, software):
     return config["categories"]
 
 
+def compare_export(backup, current):
+    """Read-only structural validation and comparison, never applies imported data."""
+    if not isinstance(backup, dict) or backup.get('format') != 'software-library-catalog':
+        raise ValueError('不是软件库资料备份文件')
+    if type(backup.get('schemaVersion')) is not int or backup['schemaVersion'] != 1:
+        raise ValueError('暂不支持此备份格式版本')
+    saved = backup.get('catalog')
+    if not isinstance(saved, dict) or not isinstance(saved.get('categories'), list):
+        raise ValueError('备份缺少有效分类资料')
+    if len(saved['categories']) > 5000: raise ValueError('备份分类数量过多')
+    nodes = {}
+    for node in saved['categories']:
+        if not isinstance(node, dict): raise ValueError('分类格式无效')
+        for key in ('id', 'name', 'parentId'):
+            if not isinstance(node.get(key), str) or len(node[key]) > 200: raise ValueError('分类字段无效')
+        if not node['id'] or not node['name'] or node['id'] in nodes: raise ValueError('分类标识为空或重复')
+        nodes[node['id']] = node
+    checked = set()
+    for node_id in nodes:
+        chain = set()
+        while node_id and node_id not in checked:
+            if node_id in chain or node_id not in nodes: raise ValueError('分类存在循环或缺失的上级')
+            chain.add(node_id); node_id = nodes[node_id]['parentId']
+        checked.update(chain)
+    for key in ('software', 'versions'):
+        values = saved.get(key)
+        if not isinstance(values, dict) or len(values) > 50000: raise ValueError('备份资料格式或数量无效')
+        if any(not isinstance(k, str) or not k or len(k)>4096 or not isinstance(v, dict) for k,v in values.items()):
+            raise ValueError('软件或版本设置格式无效')
+    inventory = backup.get('inventory')
+    if not isinstance(inventory, list) or len(inventory)>20000: raise ValueError('备份文件清单无效')
+    names, paths = set(), {}
+    for sw in inventory:
+        if not isinstance(sw, dict) or not isinstance(sw.get('name'), str) or not sw['name'] or len(sw['name'])>4096 or sw['name'] in names:
+            raise ValueError('软件清单名称无效或重复')
+        names.add(sw['name'])
+        if not isinstance(sw.get('versions'), list): raise ValueError('版本清单无效')
+        for version in sw['versions']:
+            if not isinstance(version, dict) or not isinstance(version.get('path'), str) or not version['path'] or len(version['path'])>4096:
+                raise ValueError('版本路径无效')
+            if version['path'] in paths: raise ValueError('备份含重复版本路径')
+            if type(version.get('size')) is not int or version['size']<0: raise ValueError('版本文件大小无效')
+            paths[version['path']] = version.get('size')
+            if len(paths)>50000: raise ValueError('备份文件数量过多')
+    def diff(old, new):
+        groups = {'backupOnly':sorted(set(old)-set(new)), 'currentOnly':sorted(set(new)-set(old)),
+                  'changed':sorted(k for k in set(old)&set(new) if old[k]!=new[k])}
+        return {key:{'count':len(items), 'items':items[:100]} for key,items in groups.items()}
+    live = current['catalog']
+    live_paths = {v['path']:v.get('size') for s in current['inventory'] for v in s['versions']}
+    return {'createdAt':str(backup.get('createdAt',''))[:80], 'appVersion':str(backup.get('appVersion',''))[:80],
+            'counts':{'categories':len(nodes),'software':len(names),'files':len(paths)},
+            'currentCounts':current['counts'],
+            'categories':diff(nodes,{n['id']:n for n in live['categories']}),
+            'software':diff(saved['software'],live['software']),
+            'versions':diff(saved['versions'],live['versions']),
+            'files':diff(paths,live_paths)}
+
+
 def text(value, label, limit=200):
     if not isinstance(value, str) or len(value) > limit:
         raise ValueError(label + "格式不正确或过长")

@@ -173,9 +173,16 @@ class CatalogIntegrationTests(unittest.TestCase):
         self.assertNotIn('jwt_secret',backup['catalog'])
         self.assertNotIn('password',backup['catalog']['versions']['windows.iso'])
         self.assertEqual(before,Path(app.CONFIG_FILE).read_bytes())
+        _,preview=self.fetch_status('/api/admin/catalog-preview',self.token,'POST',backup)
+        preview=json.loads(preview)
+        self.assertTrue(preview['success'])
+        self.assertEqual(preview['preview']['files']['changed']['count'],0)
+        self.assertEqual(before,Path(app.CONFIG_FILE).read_bytes())
         app.create_user('reader','reader-password','user')
         for token in ('',app.create_session('reader','user')):
             _,body=self.fetch_status('/api/admin/catalog-export',token)
+            self.assertFalse(json.loads(body)['success'])
+            _,body=self.fetch_status('/api/admin/catalog-preview',token,'POST',backup)
             self.assertFalse(json.loads(body)['success'])
 
     def test_personal_traffic_cannot_select_another_account(self):
@@ -264,7 +271,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         _, logs = self.fetch_status('/api/admin/traffic', self.token)
         self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
         _, version = self.fetch_status('/api/version')
-        self.assertEqual(json.loads(version)['version'],'11.14.0')
+        self.assertEqual(json.loads(version)['version'],'11.15.0')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')
