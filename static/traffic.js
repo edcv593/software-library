@@ -8,6 +8,8 @@ renderAdmin=function(container){
     const panel=el('section',undefined,'admin-section');container.append(panel);renderTraffic(panel);
   }
   if(adminSection==='system'){
+    const backup=el('section',undefined,'admin-section');container.append(backup);
+    backup.append(el('h3','管理资料备份'),el('p','导出分类、软件资料、版本设置和当前文件清单，便于整理前存档。'),button('导出资料备份',exportCatalog));
     const panel=el('section',undefined,'admin-section');container.append(panel);
     panel.append(el('h3','版本与更新'));
     const info=el('p','正在读取版本…');panel.append(info);
@@ -18,6 +20,19 @@ renderAdmin=function(container){
     }));
   }
 };
+function exportCatalog(){
+  const form=modal('导出管理资料');
+  form.append(el('p','包含分类树、自定义资料、版本备注、官网下载设置、115 分享链接及访问码和当前文件清单。'),el('p','这是资料存档，不包含安装包、用户账号、SMTP 设置或流量记录。完整站点备份仍需保存 Docker 数据目录和软件目录。当前版本提供导出，尚未提供一键导入恢复。'));
+  const status=el('p');status.setAttribute('role','status');form.append(status);
+  actions(form,async()=>{
+    status.textContent='正在生成备份…';
+    try{
+      const r=await api('/api/admin/catalog-export');if(!form.isConnected)return;if(!r.success)throw Error(r.error||'导出失败');
+      const blob=new Blob([JSON.stringify(r.backup,null,2)],{type:'application/json;charset=utf-8'}),url=URL.createObjectURL(blob),link=el('a');link.href=url;link.download=r.filename;form.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);
+      const c=r.backup.counts;status.textContent=`备份已生成：${c.categories} 个分类、${c.software} 个软件、${c.files} 个文件记录。请检查浏览器下载列表并妥善保存分享访问码。`;
+    }catch(e){status.textContent='导出失败：'+e.message;}
+  },'生成并下载');
+}
 async function renderTraffic(panel){
   panel.replaceChildren(el('h3','下载与流量'));
   const message=el('p','正在读取…');panel.append(message);

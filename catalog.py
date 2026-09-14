@@ -3,6 +3,29 @@ import hashlib
 import uuid
 
 
+def export_data(config, software, app_version, created):
+    """Export library metadata only; exclude unrelated site and account settings."""
+    software_keys = {'category', 'categoryId', 'icon', 'desc', 'official', 'showOfficial',
+                     'customOfficial', 'downloadUrl', 'displayName', 'notes', 'tags',
+                     'customFields', 'updateSource', 'mergedInto'}
+    version_keys = {'software', 'version', 'platform', 'arch', 'channel', 'notes',
+                    'recommended', 'reviewState', 'sha256', 'cloudUrl', 'cloudCode'}
+    def select(mapping, keys):
+        return {name: {k: v for k, v in settings.items() if k in keys}
+                for name, settings in mapping.items() if isinstance(settings, dict)}
+    return {
+        'format': 'software-library-catalog', 'schemaVersion': 1,
+        'appVersion': app_version, 'createdAt': created,
+        'catalog': {'categories': categories(config, software),
+                    'software': select(config.get('software', {}), software_keys),
+                    'versions': select(config.get('versions', {}), version_keys),
+                    'order': config.get('order', [])},
+        'inventory': software,
+        'counts': {'categories': len(config['categories']), 'software': len(software),
+                   'files': sum(len(s.get('versions', [])) for s in software)},
+    }
+
+
 def categories(config, software):
     if "categories" not in config:
         names = sorted({s.get("category", "其他") for s in software})

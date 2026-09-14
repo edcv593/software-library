@@ -54,7 +54,7 @@ SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-APP_VERSION = "11.13.0"
+APP_VERSION = "11.14.0"
 try:
     with open(os.path.join(os.path.dirname(__file__), 'build-info.json'), encoding='utf-8') as build_file:
         _build = json.load(build_file)
@@ -1372,6 +1372,15 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
             if not self._require_auth('admin'):return
             self._serve_json({'success':True,'settings':get_email_signup().public_settings()})
             return
+        if path == '/api/admin/catalog-export':
+            if not self._require_auth('admin'): return
+            with _config_lock:
+                config = load_json(CONFIG_FILE, default_config())
+                data = catalog.export_data(config, build_software_list(), APP_VERSION,
+                                           datetime.now().astimezone().isoformat())
+            self._serve_json({'success': True, 'backup': data,
+                              'filename': 'software-library-catalog-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '.json'}, private=True)
+            return
         if path == '/api/admin/grouping':
             if not self._require_auth('admin'): return
             self._serve_json({'success':True,'suggestions':grouping.suggestions(build_software_list())})
@@ -1803,12 +1812,12 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         except (OSError, ConnectionError):
             return 'interrupted'
 
-    def _serve_json(self, data, status=200):
+    def _serve_json(self, data, status=200, private=False):
         content = json.dumps(data, ensure_ascii=False).encode('utf-8')
         self.send_response(status)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', str(len(content)))
-        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('Cache-Control', 'no-store' if private else 'no-cache')
         self.end_headers()
         self.wfile.write(content)
 

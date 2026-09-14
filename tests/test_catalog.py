@@ -157,6 +157,27 @@ class CatalogIntegrationTests(unittest.TestCase):
         self.assertTrue(app.verify_user('test-admin','old')[0])
         self.assertTrue(app.find_user('test-admin')['password'].startswith('pbkdf2_sha256$'))
 
+    def test_catalog_export_is_admin_only_and_read_only(self):
+        config=app.default_config()
+        config.update(jwt_secret='site-secret',password='root-secret')
+        config['versions']={'windows.iso':{'notes':'保留备注','cloudUrl':'https://115cdn.com/s/example','cloudCode':'abcd','password':'hidden'}}
+        app.save_json(app.CONFIG_FILE,config)
+        before=Path(app.CONFIG_FILE).read_bytes()
+        _,body=self.fetch_status('/api/admin/catalog-export',self.token)
+        result=json.loads(body);backup=result['backup']
+        self.assertTrue(result['success'])
+        self.assertEqual(backup['format'],'software-library-catalog')
+        self.assertEqual(backup['counts']['files'],2)
+        self.assertEqual(backup['catalog']['versions']['windows.iso']['notes'],'保留备注')
+        self.assertEqual(backup['catalog']['versions']['windows.iso']['cloudCode'],'abcd')
+        self.assertNotIn('jwt_secret',backup['catalog'])
+        self.assertNotIn('password',backup['catalog']['versions']['windows.iso'])
+        self.assertEqual(before,Path(app.CONFIG_FILE).read_bytes())
+        app.create_user('reader','reader-password','user')
+        for token in ('',app.create_session('reader','user')):
+            _,body=self.fetch_status('/api/admin/catalog-export',token)
+            self.assertFalse(json.loads(body)['success'])
+
     def test_personal_traffic_cannot_select_another_account(self):
         app.create_user('quota-reader','reader-password','user')
         token=app.create_session('quota-reader','user')
@@ -243,7 +264,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         _, logs = self.fetch_status('/api/admin/traffic', self.token)
         self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
         _, version = self.fetch_status('/api/version')
-        self.assertEqual(json.loads(version)['version'],'11.13.0')
+        self.assertEqual(json.loads(version)['version'],'11.14.0')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')
