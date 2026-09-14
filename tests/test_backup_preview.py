@@ -38,3 +38,17 @@ class BackupPreviewTests(unittest.TestCase):
         result=catalog.compare_export(backup,current)
         self.assertEqual(result['files']['backupOnly']['count'],105)
         self.assertEqual(len(result['files']['backupOnly']['items']),100)
+
+    def test_restore_plan_preserves_site_settings_and_rejects_bad_metadata(self):
+        backup=self.sample();config={'siteSecret':'keep','software':{},'versions':{},'categories':[]}
+        backup['catalog']['software']['tool']={'notes':'restored'}
+        plan=catalog.restore_plan(backup,config,backup['inventory'])
+        self.assertEqual(plan['siteSecret'],'keep')
+        self.assertEqual(plan['software']['tool']['notes'],'restored')
+        self.assertEqual(config['software'],{})
+        for edit in [lambda b:b['catalog']['software']['tool'].update(tags='bad'),
+                     lambda b:b['catalog']['versions'].update({'tool.exe':{'cloudUrl':'https://evil.example/s/test'}}),
+                     lambda b:b['catalog']['versions'].update({'tool.exe':{'reviewState':'pending','recommended':True}}),
+                     lambda b:b['inventory'][0]['versions'][0].update(size=11)]:
+            bad=copy.deepcopy(backup);edit(bad)
+            with self.assertRaises(ValueError):catalog.restore_plan(bad,config,backup['inventory'])

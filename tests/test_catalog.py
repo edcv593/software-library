@@ -184,6 +184,8 @@ class CatalogIntegrationTests(unittest.TestCase):
             self.assertFalse(json.loads(body)['success'])
             _,body=self.fetch_status('/api/admin/catalog-preview',token,'POST',backup)
             self.assertFalse(json.loads(body)['success'])
+            _,body=self.fetch_status('/api/admin/catalog-restore',token,'POST',{'backup':backup,'confirm':True})
+            self.assertFalse(json.loads(body)['success'])
 
     def test_personal_traffic_cannot_select_another_account(self):
         app.create_user('quota-reader','reader-password','user')
@@ -196,6 +198,34 @@ class CatalogIntegrationTests(unittest.TestCase):
         self.assertEqual(result['used'],10)
         self.assertEqual([r['filename'] for r in result['records']],['own-file.exe'])
         _,body=self.fetch_status('/api/my-traffic')
+        self.assertFalse(json.loads(body)['success'])
+
+    def test_catalog_restore_freshness_safety_backup_and_write_failure(self):
+        from unittest.mock import patch
+        _,body=self.fetch_status('/api/admin/catalog-export',self.token)
+        backup=json.loads(body)['backup']
+        name=backup['inventory'][0]['name']
+        backup['catalog']['software'][name]={'notes':'from backup'}
+        _,body=self.fetch_status('/api/admin/catalog-preview',self.token,'POST',backup)
+        preview=json.loads(body)['preview'];self.assertTrue(preview['restoreReady'])
+        config=app.load_json(app.CONFIG_FILE,app.default_config());config['marker']='retain'
+        app.save_json(app.CONFIG_FILE,config)
+        request={'backup':backup,'expected':preview['restoreToken'],'confirm':True}
+        _,body=self.fetch_status('/api/admin/catalog-restore',self.token,'POST',request)
+        self.assertFalse(json.loads(body)['success'])
+        _,body=self.fetch_status('/api/admin/catalog-preview',self.token,'POST',backup)
+        request['expected']=json.loads(body)['preview']['restoreToken']
+        before=Path(app.CONFIG_FILE).read_bytes()
+        with patch.object(app,'save_json',side_effect=PermissionError('read only')):
+            status,body=self.fetch_status('/api/admin/catalog-restore',self.token,'POST',request)
+            self.assertEqual(status,500);self.assertEqual(before,Path(app.CONFIG_FILE).read_bytes())
+        _,body=self.fetch_status('/api/admin/catalog-restore',self.token,'POST',request)
+        result=json.loads(body);self.assertTrue(result['success'])
+        self.assertTrue((Path(app.DATA_DIR)/result['safetyBackup']).is_file())
+        restored=app.load_json(app.CONFIG_FILE,{})
+        self.assertEqual(restored['marker'],'retain')
+        self.assertEqual(restored['software'][name]['notes'],'from backup')
+        _,body=self.fetch_status('/api/admin/catalog-restore',self.token,'POST',request)
         self.assertFalse(json.loads(body)['success'])
 
     def test_email_signup_binding_and_password_reset(self):
@@ -271,7 +301,7 @@ class CatalogIntegrationTests(unittest.TestCase):
         _, logs = self.fetch_status('/api/admin/traffic', self.token)
         self.assertEqual(json.loads(logs)['records'][0]['filename'],'windows.iso')
         _, version = self.fetch_status('/api/version')
-        self.assertEqual(json.loads(version)['version'],'11.15.0')
+        self.assertEqual(json.loads(version)['version'],'11.16.0')
 
     def test_reader_cannot_grant_download_permission(self):
         app.create_user('reader', 'secret')

@@ -1,6 +1,8 @@
 """Persistent virtual categories and software metadata; never moves source files."""
 import hashlib
 import uuid
+import copy
+import json
 
 
 def export_data(config, software, app_version, created):
@@ -92,6 +94,58 @@ def compare_export(backup, current):
             'software':diff(saved['software'],live['software']),
             'versions':diff(saved['versions'],live['versions']),
             'files':diff(paths,live_paths)}
+
+
+def restore_plan(backup, config, software):
+    """Validate a complete metadata replacement against the current inventory."""
+    import versions
+    import updates
+    current = export_data(copy.deepcopy(config), software, '', '')
+    comparison = compare_export(backup, current)
+    if any(group['count'] for group in comparison['files'].values()):
+        raise ValueError('文件路径或大小与备份不一致，暂不能恢复；请先核对软件目录和扫描清单')
+    saved = copy.deepcopy(backup['catalog'])
+    clean = export_data(saved, backup['inventory'], '', '')['catalog']
+    if clean != saved: raise ValueError('备份含不支持的资料字段，不能直接恢复')
+    if not isinstance(saved.get('order'), list) or any(not isinstance(n,str) or len(n)>4096 for n in saved['order']):
+        raise ValueError('软件顺序格式无效')
+    node_ids = {n['id'] for n in saved['categories']}
+    siblings = set()
+    for n in saved['categories']:
+        pair = (n['parentId'], n['name'])
+        if pair in siblings: raise ValueError('存在重名的同级分类')
+        siblings.add(pair)
+    for name, cfg in saved['software'].items():
+        for key in ('category','categoryId','icon','desc','official','customOfficial','downloadUrl','displayName','notes','mergedInto'):
+            if key in cfg:text(cfg[key],key,5000)
+        if cfg.get('categoryId') and cfg['categoryId'] not in node_ids: raise ValueError('软件引用了不存在的分类')
+        if 'showOfficial' in cfg and type(cfg['showOfficial']) is not bool: raise ValueError('官网显示设置无效')
+        if 'tags' in cfg and (not isinstance(cfg['tags'],list) or len(cfg['tags'])>30 or any(not isinstance(t,str) or len(t)>60 for t in cfg['tags'])):raise ValueError('标签无效')
+        if 'customFields' in cfg:
+            fields=cfg['customFields']
+            if not isinstance(fields,dict) or len(fields)>30 or any(not isinstance(k,str) or not k or len(k)>80 or not isinstance(v,str) or len(v)>2000 for k,v in fields.items()):raise ValueError('自定义字段无效')
+        if 'updateSource' in cfg:updates.settings(cfg['updateSource'])
+    recommendations = set()
+    owners = {v['path']:s['name'] for s in backup['inventory'] for v in s['versions']}
+    for path, cfg in saved['versions'].items():
+        if cfg.get('reviewState','') not in ('','pending','rejected','approved'):raise ValueError('发布状态无效')
+        if 'sha256' in cfg and (not isinstance(cfg['sha256'],str) or len(cfg['sha256'])>64):raise ValueError('文件校验值无效')
+        if cfg.get('recommended') and cfg.get('reviewState') in ('pending','rejected'):raise ValueError('未发布版本不能设为推荐')
+        check={k:v for k,v in cfg.items() if k not in ('reviewState','sha256')}
+        if check:versions.manage({},[{'path':path,'name':owners.get(path,'')}],{'paths':[path],**check})
+        if path in owners and cfg.get('software',owners[path])!=owners[path]:raise ValueError('备份版本所属软件与清单不一致')
+        if path in owners and cfg.get('recommended'):
+            owner=owners[path]
+            if owner in recommendations:raise ValueError('同一软件存在多个推荐版本')
+            recommendations.add(owner)
+    result=copy.deepcopy(config)
+    result.update(saved)
+    return result
+
+
+def restore_fingerprint(backup, config, software):
+    content=json.dumps([backup,config,software],ensure_ascii=False,sort_keys=True,separators=(',',':'))
+    return hashlib.sha256(content.encode('utf-8')).hexdigest()
 
 
 def text(value, label, limit=200):

@@ -54,7 +54,7 @@ SCAN_FILE = os.path.join(DATA_DIR, "scan_result.json")
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 USERS_FILE = os.path.join(DATA_DIR, "users.json")
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-APP_VERSION = "11.15.0"
+APP_VERSION = "11.16.0"
 try:
     with open(os.path.join(os.path.dirname(__file__), 'build-info.json'), encoding='utf-8') as build_file:
         _build = json.load(build_file)
@@ -1451,18 +1451,43 @@ class SoftwareHandler(http.server.SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = urllib.parse.unquote(parsed.path)
 
-        if path == '/api/admin/catalog-preview':
+        if path in ('/api/admin/catalog-preview','/api/admin/catalog-restore'):
             if not self._require_auth('admin'): return
             try:
                 length = int(self.headers.get('Content-Length', '0'))
                 if length <= 0 or length > 10 * 1024 * 1024: raise ValueError('备份请求为空或超过 10 MiB')
-                backup = self._read_body()
+                payload = self._read_body()
+                restoring = path.endswith('catalog-restore')
+                if not isinstance(payload,dict):raise ValueError('备份请求无效')
+                backup = payload.get('backup') if restoring else payload
                 with _config_lock:
-                    current = catalog.export_data(load_json(CONFIG_FILE, default_config()), build_software_list(), APP_VERSION, '')
+                    if not self._require_auth('admin'):return
+                    config = load_json(CONFIG_FILE, default_config())
+                    software = build_software_list()
+                    current = catalog.export_data(config, software, APP_VERSION, '')
                     result = catalog.compare_export(backup, current)
+                    if restoring:
+                        if payload.get('confirm') is not True:raise ValueError('请先预览并确认恢复')
+                        if payload.get('expected') != catalog.restore_fingerprint(backup,config,software):raise ValueError('资料或备份已变化，请重新预览后再恢复')
+                        if _scan_lock.locked():raise ValueError('扫描正在进行，请完成后重新预览')
+                        restored = catalog.restore_plan(backup,config,software)
+                        directory = os.path.join(DATA_DIR,'catalog-backups')
+                        os.makedirs(directory,exist_ok=True)
+                        filename = 'before-restore-' + datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8] + '.json'
+                        current['createdAt'] = datetime.now().astimezone().isoformat()
+                        save_json(os.path.join(directory,filename),current)
+                        save_json(CONFIG_FILE,restored)
+                        self._serve_json({'success':True,'safetyBackup':'catalog-backups/'+filename},private=True)
+                        return
+                    try:
+                        catalog.restore_plan(backup,config,software)
+                        result.update(restoreReady=True,restoreToken=catalog.restore_fingerprint(backup,config,software))
+                    except ValueError as exc:result.update(restoreReady=False,restoreReason=str(exc))
                 self._serve_json({'success': True, 'preview': result}, private=True)
-            except (ValueError, TypeError, UnicodeError, RecursionError):
-                self._serve_json({'success':False,'error':'备份格式无效、结构不完整或超出限制，请使用本站导出的 JSON 文件'}, status=400, private=True)
+            except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+                self._serve_json({'success':False,'error':str(exc) or '备份格式无效'}, status=400, private=True)
+            except OSError:
+                self._serve_json({'success':False,'error':'无法保存资料或恢复前备份，请检查数据目录写入权限'},status=500,private=True)
             return
         if path == '/api/cloud-download':
             session=self._require_auth()

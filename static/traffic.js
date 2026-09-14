@@ -21,7 +21,7 @@ renderAdmin=function(container){
   }
 };
 function previewCatalog(){
-  const form=modal('备份校验与差异预览');form.append(el('p','选择本站导出的 JSON 资料备份（最大 8 MiB）。仅比较资料和扫描清单，不会覆盖配置或移动文件。'));
+  const form=modal('备份校验与差异预览');form.append(el('p','选择本站导出的 JSON 资料备份（最大 8 MiB）。先比较资料和扫描清单；预览后勾选确认才可恢复。文件保持原位。'));
   const file=el('input');file.type='file';file.accept='.json,application/json';file.required=true;file.setAttribute('aria-label','选择资料备份');form.append(file);
   const result=el('div');result.setAttribute('aria-live','polite');form.append(result);file.onchange=()=>result.replaceChildren();
   actions(form,async()=>{
@@ -34,13 +34,29 @@ function previewCatalog(){
         const section=el('section');section.append(el('h3',label));
         for(const [kind,title] of [['backupOnly','仅在备份中'],['currentOnly','仅在当前资料中'],['changed','内容不同']]){const group=p[key][kind],detail=el('details');detail.append(el('summary',`${title}：${group.count} 项`));if(group.count){const list=el('ul');group.items.forEach(item=>list.append(el('li',item)));detail.append(list);if(group.count>group.items.length)detail.append(el('p','仅展示前 100 项'));}section.append(detail);}result.append(section);
       }
-      result.append(el('p','文件清单差异仅依据当前扫描结果和文件大小，不代表文件内容校验；资料未被修改。'));
+      result.append(el('p','文件清单差异仅依据当前扫描结果和文件大小，不代表文件内容校验；预览不会修改资料。'));
+      if(!p.restoreReady)result.append(el('p','暂不能恢复：'+p.restoreReason));
+      else {
+        result.append(el('p','恢复将替换分类、软件资料和版本设置（含发布状态、下载来源及官网同步设置）。文件保持原位；恢复前会在数据目录 catalog-backups 中自动保存当前资料。'));
+        const agree=el('input');agree.type='checkbox';const label=el('label');label.append(agree,el('span',' 我已核对差异，同意用此备份恢复管理资料'));result.append(label);
+        const restore=button('确认恢复资料',async()=>{
+          if(!agree.checked)return;restore.disabled=true;file.disabled=true;agree.disabled=true;
+          let completed=false;
+          try{
+            const response=await api('/api/admin/catalog-restore',{method:'POST',body:{backup,expected:p.restoreToken,confirm:true}});
+            if(!response.success)throw Error(response.error||'恢复失败');completed=true;
+            result.replaceChildren(el('p','恢复完成。恢复前资料已保存：'+response.safetyBackup));
+            await loadData();render();
+          }catch(e){if(completed)result.append(el('p','资料已恢复，但页面刷新失败，请手动刷新页面。'));else result.append(el('p','恢复未确认：'+e.message+'。请重新预览并核对当前资料。'));}
+          finally{file.disabled=false;}
+        });restore.disabled=true;agree.onchange=()=>{restore.disabled=!agree.checked;};result.append(restore);
+      }
     }catch(e){result.replaceChildren(el('p','校验失败：'+e.message));}finally{file.disabled=false;}
   },'校验并预览');
 }
 function exportCatalog(){
   const form=modal('导出管理资料');
-  form.append(el('p','包含分类树、自定义资料、版本备注、官网下载设置、115 分享链接及访问码和当前文件清单。'),el('p','这是资料存档，不包含安装包、用户账号、SMTP 设置或流量记录。完整站点备份仍需保存 Docker 数据目录和软件目录。当前版本提供导出，尚未提供一键导入恢复。'));
+  form.append(el('p','包含分类树、自定义资料、版本备注、官网下载设置、115 分享链接及访问码和当前文件清单。'),el('p','这是资料存档，不包含安装包、用户账号、SMTP 设置或流量记录。完整站点备份仍需保存 Docker 数据目录和软件目录。恢复入口位于“校验备份与预览差异”，要求文件清单一致。'));
   const status=el('p');status.setAttribute('role','status');form.append(status);
   actions(form,async()=>{
     status.textContent='正在生成备份…';
